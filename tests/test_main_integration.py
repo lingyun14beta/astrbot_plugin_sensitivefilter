@@ -261,18 +261,6 @@ class FakeVisionProvider:
         return SimpleNamespace(completion_text=self.reply_text)
 
 
-class FakeVisionProvider:
-    """模拟支持视觉输入的 LLM Provider，记录最近一次调用收到的 image_urls。"""
-
-    def __init__(self, reply_text):
-        self.reply_text = reply_text
-        self.last_image_urls = None
-
-    async def text_chat(self, prompt, context=None, system_prompt="", image_urls=None):
-        self.last_image_urls = image_urls
-        return SimpleNamespace(completion_text=self.reply_text)
-
-
 class FakeContext:
     def __init__(self):
         self.sent_messages = []  # [(umo, chain)]
@@ -426,11 +414,6 @@ def make_plugin(extra_config=None):
                 "llm_batch_size": 3,
                 "llm_batch_max_wait_minutes": 60,
                 "llm_batch_prompt": main_mod.DEFAULT_LLM_BATCH_PROMPT,
-            },
-            "image_detection": {
-                "image_enabled": False,
-                "image_provider_id": "",
-                "image_prompt": main_mod.DEFAULT_IMAGE_PROMPT,
             },
             "image_detection": {
                 "image_enabled": False,
