@@ -20,6 +20,7 @@ TEST_FILES = [
     "test_word_matcher.py",
     "test_api_checkers.py",
     "test_llm_checker.py",
+    "test_image_checker.py",
     "test_main_integration.py",
 ]
 

@@ -31,6 +31,7 @@ from .api_checkers import (
     check_via_api,
     check_via_uapis_profanitycheck,
 )
+from .image_checker import DEFAULT_IMAGE_PROMPT, check_image
 from .llm_checker import DEFAULT_LLM_PROMPT, check_via_llm
 from .word_matcher import WordTrie, normalize_text
 
@@ -40,6 +41,7 @@ _OVERRIDABLE_BOOL_KEYS = (
     "local_enabled",
     "api_enabled",
     "llm_enabled",
+    "image_enabled",
     "recall_enabled",
     "warn_enabled",
     "notify_enabled",
@@ -77,6 +79,9 @@ _KEY_TO_SECTION = {
     "llm_enabled": "llm_detection",
     "llm_provider_id": "llm_detection",
     "llm_prompt": "llm_detection",
+    "image_enabled": "image_detection",
+    "image_provider_id": "image_detection",
+    "image_prompt": "image_detection",
 }
 
 # group_overrides（template_list）里唯一的模板名。WebUI 新增条目、以及插件自己
@@ -100,6 +105,8 @@ _SETTING_KEY_ALIASES = {
     "ai": "llm_enabled",
     "AI": "llm_enabled",
     "llm": "llm_enabled",
+    "图片": "image_enabled",
+    "图片检测": "image_enabled",
     "撤回": "recall_enabled",
     "警告": "warn_enabled",
     "通知": "notify_enabled",
@@ -217,6 +224,7 @@ class SensitiveFilterPlugin(Star):
             "local_enabled": "跟随全局",
             "api_enabled": "跟随全局",
             "llm_enabled": "跟随全局",
+            "image_enabled": "跟随全局",
             "recall_enabled": "跟随全局",
             "warn_enabled": "跟随全局",
             "notify_enabled": "跟随全局",
@@ -370,11 +378,13 @@ class SensitiveFilterPlugin(Star):
             return
 
         text = (event.message_str or "").strip()
-        if not text:
-            return
 
         try:
-            hit_word, source = await self._check_text(event, umo, text)
+            hit_word = source = None
+            if text:
+                hit_word, source = await self._check_text(event, umo, text)
+            if not hit_word and self._get_effective(umo, "image_enabled", False):
+                hit_word, source = await self._check_images(event, umo)
         except Exception:
             logger.exception("[敏感词过滤] 检测过程中发生异常，本次跳过")
             return
@@ -459,6 +469,65 @@ class SensitiveFilterPlugin(Star):
                         return (reason or "AI 判定违规"), "AI 语义检测"
             except Exception:
                 logger.exception("[敏感词过滤] AI 语义检测失败，已跳过此次检测")
+
+        return None, None
+
+    def _get_images_from_event(self, event: AstrMessageEvent) -> list:
+        """从事件的消息链里取出所有图片组件（Comp.Image）。"""
+        message = getattr(event.message_obj, "message", None) or []
+        return [c for c in message if isinstance(c, Comp.Image)]
+
+    async def _check_images(
+        self, event: AstrMessageEvent, umo: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """对消息里的图片做检测：先看图片内容本身是否违规，再把图片里的文字
+        转写出来复用现有的文字检测流水线。任意一张图片命中即返回，不再继续看
+        后面的图片。"""
+        images = self._get_images_from_event(event)
+        if not images:
+            return None, None
+
+        provider_id = (self._cfg("image_provider_id") or "").strip()
+        if not provider_id:
+            # 没有显式配置支持视觉的 Provider 就不执行图片检测，
+            # 不会盲目尝试用当前会话的文字模型去识图。
+            return None, None
+        provider = self.context.get_provider_by_id(provider_id)
+        if not provider:
+            logger.warning(
+                f"[敏感词过滤] 配置的图片审核 Provider「{provider_id}」不存在，已跳过图片检测"
+            )
+            return None, None
+
+        prompt_template = self._cfg("image_prompt") or DEFAULT_IMAGE_PROMPT
+
+        for image in images:
+            try:
+                image_path = await image.convert_to_file_path()
+            except Exception:
+                logger.exception("[敏感词过滤] 图片转换为本地路径失败，跳过这张图片")
+                continue
+
+            try:
+                image_violate, image_reason, extracted_text = await check_image(
+                    provider, image_path, prompt_template=prompt_template
+                )
+            except Exception:
+                logger.exception(
+                    "[敏感词过滤] 调用图片审核 Provider 失败，跳过这张图片"
+                )
+                continue
+
+            if image_violate:
+                return (image_reason or "AI 判定图片违规"), "AI 图片审核"
+
+            extracted_text = (extracted_text or "").strip()
+            if extracted_text:
+                hit_word, text_source = await self._check_text(
+                    event, umo, extracted_text
+                )
+                if hit_word:
+                    return hit_word, f"图片文字识别（{text_source}）"
 
         return None, None
 
@@ -556,7 +625,7 @@ class SensitiveFilterPlugin(Star):
             "/敏感词 本群添加 <词>  仅本群额外生效的词\n"
             "/敏感词 本群删除 <词>  删除本群专属词\n"
             "/敏感词 设置 <项> <on/off/默认>  本群单独覆盖某个开关\n"
-            "    可设置项：总开关/本地/接口/ai/撤回/警告/通知\n"
+            "    可设置项：总开关/本地/接口/ai/图片/撤回/警告/通知\n"
             "/敏感词 状态           查看本群当前生效的配置\n"
             "/敏感词 白名单 开启|关闭|添加本群|删除本群|列表\n"
             "/敏感词 黑名单 开启|关闭|添加本群|删除本群|列表\n"
@@ -718,6 +787,7 @@ class SensitiveFilterPlugin(Star):
             fmt("local_enabled", "本地词库检测"),
             fmt("api_enabled", "外部接口检测"),
             fmt("llm_enabled", "AI 语义检测"),
+            fmt("image_enabled", "图片检测"),
             fmt("recall_enabled", "命中后撤回"),
             fmt("warn_enabled", "命中后警告"),
             fmt("notify_enabled", "命中后通知"),
