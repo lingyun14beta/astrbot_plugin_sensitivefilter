@@ -157,8 +157,27 @@ class Plain:
         return f"Plain({self.text!r})"
 
 
+class Image:
+    """模拟 Comp.Image，提供 convert_to_file_path()，与真实实现一样统一
+    把任意来源（URL/本地路径/base64）的图片转换成一个可用的本地路径。"""
+
+    def __init__(self, file=None, url=None, path=None):
+        self.file = file or ""
+        self.url = url or ""
+        self.path = path or ""
+
+    async def convert_to_file_path(self):
+        if self.path:
+            return self.path
+        return self.url or self.file
+
+    def __repr__(self):
+        return f"Image(file={self.file!r})"
+
+
 astrbot_api_msgcomp_mod.At = At
 astrbot_api_msgcomp_mod.Plain = Plain
+astrbot_api_msgcomp_mod.Image = Image
 
 # ---- aiocqhttp 撤回相关（main.py 内部懒加载导入） ----
 aiocqhttp_pkg = types.ModuleType(
@@ -228,6 +247,18 @@ class FakeProvider:
         return SimpleNamespace(completion_text=self.reply_text)
 
 
+class FakeVisionProvider:
+    """模拟支持视觉输入的 LLM Provider，记录最近一次调用收到的 image_urls。"""
+
+    def __init__(self, reply_text):
+        self.reply_text = reply_text
+        self.last_image_urls = None
+
+    async def text_chat(self, prompt, context=None, system_prompt="", image_urls=None):
+        self.last_image_urls = image_urls
+        return SimpleNamespace(completion_text=self.reply_text)
+
+
 class FakeContext:
     def __init__(self):
         self.sent_messages = []  # [(umo, chain)]
@@ -263,7 +294,7 @@ class FakeEvent(main_mod.AstrMessageEvent if False else object):
 
     platform_name = "telegram"
 
-    def __init__(self, group_id, sender_id, sender_name, text, umo=None):
+    def __init__(self, group_id, sender_id, sender_name, text, umo=None, images=None):
         self._group_id = group_id
         self._sender_id = sender_id
         self._sender_name = sender_name
@@ -271,7 +302,10 @@ class FakeEvent(main_mod.AstrMessageEvent if False else object):
         self.unified_msg_origin = umo or f"{self.platform_name}:GroupMessage:{group_id}"
         self.sent_results = []
         self.stopped = False
-        self.message_obj = SimpleNamespace(message_id="msg-1")
+        message_chain = list(images or [])
+        if text:
+            message_chain.append(Plain(text))
+        self.message_obj = SimpleNamespace(message_id="msg-1", message=message_chain)
 
     def get_group_id(self):
         return self._group_id
@@ -375,6 +409,11 @@ def make_plugin(extra_config=None):
                 "llm_provider_id": "",
                 "llm_prompt": main_mod.DEFAULT_LLM_PROMPT,
             },
+            "image_detection": {
+                "image_enabled": False,
+                "image_provider_id": "",
+                "image_prompt": main_mod.DEFAULT_IMAGE_PROMPT,
+            },
         }
     )
     if extra_config:
@@ -471,6 +510,113 @@ async def run_tests():
         "LLM命中原因体现在警告文案中",
         any("AI 语义检测" in getattr(c, "text", "") for c in warn_chain2),
     )
+    config["llm_detection"]["llm_enabled"] = False
+
+    # ---------- 图片检测：没有配置 image_provider_id 时完全不处理图片 ----------
+    config["image_detection"]["image_enabled"] = True
+    config["image_detection"]["image_provider_id"] = ""  # 故意留空
+    ev_img_noprov = FakeEvent(
+        "group_img1",
+        "u30",
+        "图片测试甲",
+        "",
+        images=[Image(file="https://example.com/a.jpg")],
+    )
+    await plugin.on_group_message(ev_img_noprov)
+    check(
+        "未配置image_provider_id时图片检测完全跳过",
+        len(ev_img_noprov.sent_results) == 0 and not ev_img_noprov.stopped,
+    )
+
+    # ---------- 图片检测：图片内容本身违规 ----------
+    ctx.provider_by_id["vision-1"] = FakeVisionProvider(
+        '{"image_violate": true, "image_reason": "血腥暴力画面", "extracted_text": ""}'
+    )
+    config["image_detection"]["image_provider_id"] = "vision-1"
+    ev_img_violate = FakeEvent(
+        "group_img1",
+        "u31",
+        "图片测试乙",
+        "",
+        images=[Image(file="https://example.com/b.jpg")],
+    )
+    await plugin.on_group_message(ev_img_violate)
+    check("图片内容违规时发出警告", len(ev_img_violate.sent_results) == 1)
+    warn_kind_img, warn_chain_img = ev_img_violate.sent_results[0]
+    check(
+        "图片违规来源体现在警告文案中",
+        any("AI 图片审核" in getattr(c, "text", "") for c in warn_chain_img),
+    )
+    check(
+        "确实把图片路径传给了视觉Provider",
+        ctx.provider_by_id["vision-1"].last_image_urls == ["https://example.com/b.jpg"],
+    )
+
+    # ---------- 图片检测：图片本身不违规，但文字命中本地词库 ----------
+    config["basic"]["words"] = ["敏感词", "广告"]
+    plugin._rebuild_global_trie()
+    ctx.provider_by_id["vision-1"].reply_text = (
+        '{"image_violate": false, "image_reason": "", '
+        '"extracted_text": "这张图片里写着敏感词"}'
+    )
+    ev_img_text_hit = FakeEvent(
+        "group_img1",
+        "u32",
+        "图片测试丙",
+        "",
+        images=[Image(file="https://example.com/c.jpg")],
+    )
+    await plugin.on_group_message(ev_img_text_hit)
+    check("图片文字命中本地词库时发出警告", len(ev_img_text_hit.sent_results) == 1)
+    warn_kind_img2, warn_chain_img2 = ev_img_text_hit.sent_results[0]
+    check(
+        "图片文字识别来源体现在警告文案中",
+        any(
+            "图片文字识别" in getattr(c, "text", "")
+            and "本地词库" in getattr(c, "text", "")
+            for c in warn_chain_img2
+        ),
+    )
+
+    # ---------- 图片检测：图片不违规且没有文字 ----------
+    ctx.provider_by_id[
+        "vision-1"
+    ].reply_text = '{"image_violate": false, "image_reason": "", "extracted_text": ""}'
+    ev_img_clean = FakeEvent(
+        "group_img1",
+        "u33",
+        "图片测试丁",
+        "",
+        images=[Image(file="https://example.com/d.jpg")],
+    )
+    await plugin.on_group_message(ev_img_clean)
+    check("图片完全正常时不发出任何动作", len(ev_img_clean.sent_results) == 0)
+
+    # ---------- 图片检测：群级覆盖关闭图片检测 ----------
+    plugin._get_or_create_group_override(ev_img_clean.unified_msg_origin)[
+        "image_enabled"
+    ] = "关闭"
+    ctx.provider_by_id[
+        "vision-1"
+    ].reply_text = (
+        '{"image_violate": true, "image_reason": "测试", "extracted_text": ""}'
+    )
+    ev_img_overridden_off = FakeEvent(
+        "group_img1",
+        "u34",
+        "图片测试戊",
+        "",
+        images=[Image(file="https://example.com/e.jpg")],
+        umo=ev_img_clean.unified_msg_origin,
+    )
+    await plugin.on_group_message(ev_img_overridden_off)
+    check(
+        "本群覆盖关闭图片检测后即使图片违规也不处理",
+        len(ev_img_overridden_off.sent_results) == 0,
+    )
+
+    config["image_detection"]["image_enabled"] = False
+    config["image_detection"]["image_provider_id"] = ""
 
     # ---------- 外部接口检测：uapis_profanitycheck ----------
     async def handle_uapis_e2e(request):

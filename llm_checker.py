@@ -8,12 +8,9 @@
 
 from __future__ import annotations
 
-import json
-import re
-
 from astrbot.api import logger
 
-from .utils import to_bool
+from .utils import extract_json, to_bool
 
 DEFAULT_LLM_PROMPT = """<group_chat_moderation>
   <role>你是群聊内容合规审核员，只判断这条消息是否触发下方明确列出的拦截范围。</role>
@@ -45,26 +42,6 @@ DEFAULT_LLM_PROMPT = """<group_chat_moderation>
   </output_rules>
 </group_chat_moderation>"""
 
-_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
-def _extract_json(text: str) -> dict | None:
-    """从 LLM 回复中尽量提取出一个 JSON 对象（模型有时会附带多余文字）。"""
-    if not text:
-        return None
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    m = _JSON_OBJ_RE.search(text)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            return None
-    return None
-
 
 async def check_via_llm(
     provider,
@@ -92,7 +69,7 @@ async def check_via_llm(
         system_prompt="",
     )
     completion_text = getattr(llm_resp, "completion_text", "") or ""
-    parsed = _extract_json(completion_text)
+    parsed = extract_json(completion_text)
     if not parsed:
         logger.warning(
             f"[敏感词过滤] LLM 审核返回内容无法解析为 JSON: {completion_text!r}"
