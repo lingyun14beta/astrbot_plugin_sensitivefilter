@@ -2,13 +2,11 @@ name: astrbot_plugin_sensitivefilter
 desc: 群聊敏感词检测插件，支持本地词库/外部接口/AI 语义识别三种检测方式，可按群单独配置撤回、警告、通知等处理动作
 short_desc: 群聊敏感词检测与自动处理
 version: 1.0.0
-author: YourName
-repo: https://github.com/yourname/astrbot_plugin_sensitivefilter
+author: lingyun
+repo: https://github.com/lingyun14beta/astrbot_plugin_sensitivefilter
 support_platforms:
   - aiocqhttp
-  - qq_official
   - telegram
   - lark
   - dingtalk
   - discord
-  - wecom

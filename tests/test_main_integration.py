@@ -242,8 +242,22 @@ class FakeConfig(dict):
 class FakeProvider:
     def __init__(self, reply_text):
         self.reply_text = reply_text
+        self.last_prompt = None
 
     async def text_chat(self, prompt, context=None, system_prompt=""):
+        self.last_prompt = prompt
+        return SimpleNamespace(completion_text=self.reply_text)
+
+
+class FakeVisionProvider:
+    """模拟支持视觉输入的 LLM Provider，记录最近一次调用收到的 image_urls。"""
+
+    def __init__(self, reply_text):
+        self.reply_text = reply_text
+        self.last_image_urls = None
+
+    async def text_chat(self, prompt, context=None, system_prompt="", image_urls=None):
+        self.last_image_urls = image_urls
         return SimpleNamespace(completion_text=self.reply_text)
 
 
@@ -408,6 +422,15 @@ def make_plugin(extra_config=None):
                 "llm_enabled": False,
                 "llm_provider_id": "",
                 "llm_prompt": main_mod.DEFAULT_LLM_PROMPT,
+                "llm_batch_enabled": False,
+                "llm_batch_size": 3,
+                "llm_batch_max_wait_minutes": 60,
+                "llm_batch_prompt": main_mod.DEFAULT_LLM_BATCH_PROMPT,
+            },
+            "image_detection": {
+                "image_enabled": False,
+                "image_provider_id": "",
+                "image_prompt": main_mod.DEFAULT_IMAGE_PROMPT,
             },
             "image_detection": {
                 "image_enabled": False,
@@ -510,6 +533,157 @@ async def run_tests():
         "LLM命中原因体现在警告文案中",
         any("AI 语义检测" in getattr(c, "text", "") for c in warn_chain2),
     )
+    config["llm_detection"]["llm_enabled"] = False
+
+    # ---------- AI 语义检测：批量审核（按数量触发） ----------
+    config["llm_detection"]["llm_enabled"] = True
+    config["llm_detection"]["llm_batch_enabled"] = True
+    config["llm_detection"]["llm_batch_size"] = 3
+    batch_provider = FakeProvider(
+        '{"results": ['
+        '{"index": 0, "violate": false, "reason": ""}, '
+        '{"index": 1, "violate": true, "reason": "广告引流"}, '
+        '{"index": 2, "violate": false, "reason": ""}'
+        "]}"
+    )
+    ctx.using_provider = batch_provider
+
+    ev_b1 = FakeEvent("group_batch", "u40", "批量甲", "今天天气不错")
+    ev_b2 = FakeEvent("group_batch", "u41", "批量乙", "加我微信领取奖品")
+    ev_b3 = FakeEvent("group_batch", "u42", "批量丙", "中午吃什么")
+
+    await plugin.on_group_message(ev_b1)
+    check(
+        "凑不齐batch_size前不会立刻有任何动作-第1条",
+        len(ev_b1.sent_results) == 0 and not ev_b1.stopped,
+    )
+    check(
+        "队列里确实攒了这条消息",
+        len(plugin._llm_batches.get(ev_b1.unified_msg_origin, [])) == 1,
+    )
+
+    await plugin.on_group_message(ev_b2)
+    check("凑不齐batch_size前不会立刻有任何动作-第2条", len(ev_b2.sent_results) == 0)
+
+    await plugin.on_group_message(ev_b3)
+    # 第3条进来正好凑满 batch_size=3，应该立即触发一次flush
+    check(
+        "凑满batch_size后队列被清空",
+        ev_b1.unified_msg_origin not in plugin._llm_batches,
+    )
+    check("批量命中的那条(第2条)被警告", len(ev_b2.sent_results) == 1)
+    check("批量未命中的不会被警告-第1条", len(ev_b1.sent_results) == 0)
+    check("批量未命中的不会被警告-第3条", len(ev_b3.sent_results) == 0)
+    warn_kind_batch, warn_chain_batch = ev_b2.sent_results[0]
+    check(
+        "批量命中来源体现在警告文案中",
+        any("AI 语义检测（批量）" in getattr(c, "text", "") for c in warn_chain_batch),
+    )
+    check(
+        "批量prompt里包含三条消息内容",
+        "今天天气不错" in batch_provider.last_prompt
+        and "加我微信领取奖品" in batch_provider.last_prompt
+        and "中午吃什么" in batch_provider.last_prompt,
+    )
+
+    # ---------- AI 语义检测：批量审核（超时兜底，不依赖真实sleep） ----------
+    ev_b4 = FakeEvent("group_batch2", "u43", "批量丁", "测试超时兜底")
+    ctx.using_provider = FakeProvider(
+        '{"results": [{"index": 0, "violate": true, "reason": "测试超时命中"}]}'
+    )
+    await plugin.on_group_message(ev_b4)
+    check(
+        "未凑满batch_size时不会立刻发出",
+        len(ev_b4.sent_results) == 0
+        and len(plugin._llm_batches.get(ev_b4.unified_msg_origin, [])) == 1,
+    )
+    # 手动把这条消息的入队时间往前调，模拟“已经等待超过兜底超时时间”
+    bucket = plugin._llm_batches[ev_b4.unified_msg_origin]
+    old_item = bucket[0]
+    bucket[0] = (old_item[0], old_item[1], old_item[2], old_item[3] - 9999)
+    config["llm_detection"]["llm_batch_max_wait_minutes"] = 1
+    await plugin._flush_overdue_llm_batches()
+    check(
+        "超时兜底触发后队列被清空", ev_b4.unified_msg_origin not in plugin._llm_batches
+    )
+    check("超时兜底触发后命中的消息被警告", len(ev_b4.sent_results) == 1)
+
+    # ---------- 精确验证 llm_batch_max_wait_minutes 确实按分钟换算成秒 ----------
+    # 不依赖上面那种数千秒的极端偏移量，专门验证“刚好不够 / 刚好超过”这个边界。
+    ev_b4b = FakeEvent("group_batch2b", "u43b", "换算边界测试", "测试分钟换算")
+    await plugin.on_group_message(ev_b4b)
+    bucket_b = plugin._llm_batches[ev_b4b.unified_msg_origin]
+    old_item_b = bucket_b[0]
+    # 配置 2 分钟兜底，把入队时间往前调 90 秒（1.5 分钟）——还没到 2 分钟，不该被冲掉
+    config["llm_detection"]["llm_batch_max_wait_minutes"] = 2
+    bucket_b[0] = (old_item_b[0], old_item_b[1], old_item_b[2], old_item_b[3] - 90)
+    await plugin._flush_overdue_llm_batches()
+    check(
+        "未达到分钟换算后的秒数时不会被冲掉",
+        ev_b4b.unified_msg_origin in plugin._llm_batches,
+    )
+    # 再把时间往前调到总共 130 秒（超过 2 分钟=120 秒），这次应该被冲掉
+    bucket_b = plugin._llm_batches[ev_b4b.unified_msg_origin]
+    old_item_b2 = bucket_b[0]
+    bucket_b[0] = (old_item_b2[0], old_item_b2[1], old_item_b2[2], old_item_b2[3] - 40)
+    await plugin._flush_overdue_llm_batches()
+    check(
+        "超过分钟换算后的秒数后队列被冲掉",
+        ev_b4b.unified_msg_origin not in plugin._llm_batches,
+    )
+
+    # ---------- AI 语义检测：批量审核 - Provider 缺失时不报错，队列被清空 ----------
+    config["llm_detection"]["llm_provider_id"] = "not-exist-provider"
+    ctx.using_provider = None
+    ev_b5 = FakeEvent("group_batch3", "u44", "批量戊", "消息1")
+    ev_b6 = FakeEvent("group_batch3", "u45", "批量己", "消息2")
+    ev_b7 = FakeEvent("group_batch3", "u46", "批量庚", "消息3")
+    await plugin.on_group_message(ev_b5)
+    await plugin.on_group_message(ev_b6)
+    await plugin.on_group_message(ev_b7)
+    check(
+        "找不到Provider时不报错且队列仍被清空",
+        ev_b5.unified_msg_origin not in plugin._llm_batches,
+    )
+    check(
+        "找不到Provider时不会误判任何消息违规",
+        len(ev_b5.sent_results) == 0
+        and len(ev_b6.sent_results) == 0
+        and len(ev_b7.sent_results) == 0,
+    )
+    config["llm_detection"]["llm_provider_id"] = ""
+
+    # ---------- AI 语义检测：图片转写出的文字不参与批量，始终即时检测 ----------
+    config["llm_detection"]["llm_batch_size"] = 10  # 调大，确保不会因为凑批而被动触发
+    config["image_detection"]["image_enabled"] = True
+    config["image_detection"]["image_provider_id"] = "vision-batch-test"
+    ctx.provider_by_id["vision-batch-test"] = FakeVisionProvider(
+        '{"image_violate": false, "image_reason": "", "extracted_text": "图片里的广告文字"}'
+    )
+    ctx.using_provider = FakeProvider(
+        '{"violate": true, "reason": "图片文字命中AI语义检测"}'
+    )
+    ev_img_text = FakeEvent(
+        "group_batch4",
+        "u47",
+        "批量辛",
+        "",
+        images=[Image(file="https://example.com/batch.jpg")],
+    )
+    await plugin.on_group_message(ev_img_text)
+    check(
+        "图片转写文字不进入批量队列，立即得到结果并警告",
+        len(ev_img_text.sent_results) == 1,
+    )
+    check(
+        "图片转写文字检测后批量队列里没有残留",
+        ev_img_text.unified_msg_origin not in plugin._llm_batches
+        or len(plugin._llm_batches.get(ev_img_text.unified_msg_origin, [])) == 0,
+    )
+    config["image_detection"]["image_enabled"] = False
+    config["image_detection"]["image_provider_id"] = ""
+
+    config["llm_detection"]["llm_batch_enabled"] = False
     config["llm_detection"]["llm_enabled"] = False
 
     # ---------- 图片检测：没有配置 image_provider_id 时完全不处理图片 ----------
@@ -931,7 +1105,60 @@ async def run_tests():
         plugin._cfg("warn_message") == "自定义警告：{word}",
     )
 
+    # ---------- 管理指令：手动触发批量发送 ----------
+    config["llm_detection"]["llm_enabled"] = True
+    config["llm_detection"]["llm_batch_enabled"] = True
+    config["llm_detection"]["llm_batch_size"] = 99  # 故意调大，确保不会自动凑满
+    config["llm_detection"]["llm_provider_id"] = ""
+    ctx.using_provider = FakeProvider(
+        '{"results": [{"index": 0, "violate": true, "reason": "手动触发命中"}]}'
+    )
+
+    ev_manual = FakeEvent("group_manual", "u50", "手动触发测试", "测试手动批量发送")
+    await plugin.on_group_message(ev_manual)
+    check(
+        "手动触发前队列里确实有这条消息",
+        len(plugin._llm_batches.get(ev_manual.unified_msg_origin, [])) == 1,
+    )
+
+    gen_flush_empty = plugin.cmd_flush_batch(ev_llm)  # ev_llm对应的会话队列是空的
+    r_flush_empty = [r async for r in gen_flush_empty]
+    check("对空队列手动触发时有合适提示", "没有" in r_flush_empty[0][1])
+
+    gen_flush = plugin.cmd_flush_batch(ev_manual)
+    r_flush = [r async for r in gen_flush]
+    check("手动触发批量发送有反馈", len(r_flush) == 1)
+    check(
+        "手动触发后队列被清空",
+        ev_manual.unified_msg_origin not in plugin._llm_batches,
+    )
+    check("手动触发后命中的消息被警告", len(ev_manual.sent_results) == 1)
+
+    config["llm_detection"]["llm_batch_size"] = 10
+    config["llm_detection"]["llm_batch_enabled"] = False
+    config["llm_detection"]["llm_enabled"] = False
+
+    # ---------- 插件关闭(terminate)前会把残留队列里的消息做最后一次检测 ----------
+    config["llm_detection"]["llm_enabled"] = True
+    config["llm_detection"]["llm_batch_enabled"] = True
+    config["llm_detection"]["llm_batch_size"] = 99
+    ctx.using_provider = FakeProvider(
+        '{"results": [{"index": 0, "violate": true, "reason": "关闭前兜底命中"}]}'
+    )
+    ev_pending = FakeEvent("group_pending", "u51", "关闭前残留测试", "测试关闭前兜底")
+    await plugin.on_group_message(ev_pending)
+    check(
+        "插件关闭前队列里确实还有未处理的消息",
+        len(plugin._llm_batches.get(ev_pending.unified_msg_origin, [])) == 1,
+    )
+
     await plugin.terminate()
+
+    check(
+        "插件关闭后残留队列里的消息被补做了一次检测",
+        len(ev_pending.sent_results) == 1,
+    )
+    check("插件关闭后队列已清空", len(plugin._llm_batches) == 0)
 
 
 asyncio.run(run_tests())
