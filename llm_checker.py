@@ -79,3 +79,87 @@ async def check_via_llm(
     violate = to_bool(parsed.get("violate", False))
     reason = parsed.get("reason")
     return violate, (str(reason) if reason else None)
+
+
+# 批量审核：一次模型调用同时判断多条消息，用来摊薄每条消息的固定 Prompt
+# 开销，降低高频群聊场景下的调用次数和费用。返回的 JSON 用 {"results": [...]}
+# 这种“外面包一层对象”的形式，而不是直接返回裸数组，是为了能复用上面
+# check_via_llm 已经验证过的 extract_json()（它只识别 {...} 形式的对象，
+# 不处理裸数组），避免再单独写一套数组提取逻辑。
+DEFAULT_LLM_BATCH_PROMPT = """<group_chat_moderation_batch>
+  <role>你是群聊内容合规审核助手，下面会给你多条消息，需要对每一条分别独立做出判断。</role>
+  <block_policy>
+    判断每一条消息是否违反群规，包括但不限于：恶意广告引流、人身攻击辱骂、
+    诈骗信息、违法信息等。每条消息必须独立判断：不能因为列表里其他消息违规
+    就连带认为某一条也违规，也不能因为某条正常就影响其他消息的判断。
+  </block_policy>
+  <messages><![CDATA[
+{messages}
+  ]]></messages>
+  <output_rules>
+    只输出一个合法 JSON 对象，不要 Markdown、代码块或额外文字，格式严格如下：
+    {"results": [{"index": 0, "violate": true 或 false, "reason": "违规时给出简短原因，不违规则输出空字符串"}]}
+    results 数组长度必须与上面给出的消息条数完全一致，index 从 0 开始按顺序排列，不能遗漏、不能重复、不能调换顺序。
+  </output_rules>
+</group_chat_moderation_batch>"""
+
+
+async def check_via_llm_batch(
+    provider,
+    texts: list[str],
+    *,
+    prompt_template: str = DEFAULT_LLM_BATCH_PROMPT,
+) -> list[tuple[bool, str | None]]:
+    """对一批文本做语义级合规判断，一次模型调用返回每条消息各自的判断结果。
+
+    Args:
+        provider: LLM Provider 实例。
+        texts: 待审核的消息列表。
+        prompt_template: 批量审核 Prompt，需要包含 `{messages}` 占位符。
+
+    Returns:
+        长度、顺序都与 texts 一一对应的 (是否违规, 原因或 None) 列表。
+        模型返回的结果数量或下标如果和输入不匹配，缺失的部分按“未违规”
+        兜底处理（宁可漏检也不要因为解析异常而崩溃或误判）。
+    """
+    n = len(texts)
+    if provider is None or n == 0:
+        return [(False, None)] * n
+
+    messages_block = "\n".join(f"    [{i}] {t}" for i, t in enumerate(texts))
+    if "{messages}" in prompt_template:
+        prompt = prompt_template.replace("{messages}", messages_block)
+    else:
+        prompt = f"{prompt_template}\n\n待审核的消息列表：\n{messages_block}"
+
+    llm_resp = await provider.text_chat(
+        prompt=prompt,
+        context=[],
+        system_prompt="",
+    )
+    completion_text = getattr(llm_resp, "completion_text", "") or ""
+    parsed = extract_json(completion_text)
+
+    results_by_index: dict[int, tuple[bool, str | None]] = {}
+    if parsed and isinstance(parsed.get("results"), list):
+        for item in parsed["results"]:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            if not isinstance(idx, int):
+                continue
+            violate = to_bool(item.get("violate", False))
+            reason = item.get("reason")
+            results_by_index[idx] = (violate, str(reason) if reason else None)
+    else:
+        logger.warning(
+            f"[敏感词过滤] 批量审核返回内容无法解析为预期格式: {completion_text!r}"
+        )
+
+    if len(results_by_index) != n:
+        logger.warning(
+            f"[敏感词过滤] 批量审核返回的结果数量（{len(results_by_index)}）与"
+            f"消息数量（{n}）不一致，缺失部分按未违规处理"
+        )
+
+    return [results_by_index.get(i, (False, None)) for i in range(n)]

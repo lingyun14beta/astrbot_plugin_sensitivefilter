@@ -2,10 +2,11 @@
 """
 群聊敏感词检测插件。
 
-支持三种互相独立、可叠加使用的检测方式：
+支持四种互相独立、可叠加使用的检测方式：
     1. 本地词库匹配（Trie 树，支持模糊匹配防拆字绕过）
     2. 外部接口检测（适配任意第三方文本审核 API）
-    3. AI 语义检测（调用 AstrBot 已配置的 LLM 提供商）
+    3. AI 语义检测（调用 AstrBot 已配置的 LLM 提供商，支持攒批合并发送以降低成本）
+    4. 图片检测（调用支持视觉的 LLM Provider 直接识图）
 
 命中后的处理动作（撤回 / 群内警告 / 转发通知）三者互相独立，可分别开关，
 并且支持在“全局默认值”基础上为每个群单独覆盖。
@@ -17,6 +18,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, Optional, Tuple
 
 import aiohttp
@@ -32,7 +35,12 @@ from .api_checkers import (
     check_via_uapis_profanitycheck,
 )
 from .image_checker import DEFAULT_IMAGE_PROMPT, check_image
-from .llm_checker import DEFAULT_LLM_PROMPT, check_via_llm
+from .llm_checker import (
+    DEFAULT_LLM_BATCH_PROMPT,
+    DEFAULT_LLM_PROMPT,
+    check_via_llm,
+    check_via_llm_batch,
+)
 from .word_matcher import WordTrie, normalize_text
 
 # 群配置中支持“跟随全局 / 单独覆盖”的布尔类开关
@@ -78,6 +86,10 @@ _KEY_TO_SECTION = {
     "api_timeout": "api_detection",
     "llm_enabled": "llm_detection",
     "llm_provider_id": "llm_detection",
+    "llm_batch_enabled": "llm_detection",
+    "llm_batch_size": "llm_detection",
+    "llm_batch_max_wait_minutes": "llm_detection",
+    "llm_batch_prompt": "llm_detection",
     "llm_prompt": "llm_detection",
     "image_enabled": "image_detection",
     "image_provider_id": "image_detection",
@@ -131,12 +143,40 @@ class SensitiveFilterPlugin(Star):
 
         self._http_session: Optional[aiohttp.ClientSession] = None
 
+        # AI 语义检测的批量缓冲区：每个会话（umo）一个队列，元素是
+        # (event, umo, text, enqueued_at)。只有“消息自身的文字”会被攒批，
+        # 图片转写出的文字（_check_images 内部调用）始终走即时检测，不进队列。
+        self._llm_batches: dict[str, list[tuple]] = {}
+        self._llm_batch_lock = asyncio.Lock()
+        self._batch_ticker_task: Optional[asyncio.Task] = None
+        try:
+            self._batch_ticker_task = asyncio.create_task(self._batch_ticker_loop())
+        except RuntimeError:
+            # 极少数情况下实例化时还没有运行中的事件循环（例如某些测试场景），
+            # 退化为“只靠批量大小触发、没有兜底超时”，不影响插件其他功能正常加载。
+            logger.warning(
+                "[敏感词过滤] 创建批量审核定时任务失败（没有运行中的事件循环），"
+                "批量审核的兜底超时机制将不可用，但按数量触发的批量逻辑仍正常工作"
+            )
+
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
 
     async def terminate(self):
         """插件卸载/停用时调用，负责释放资源。"""
+        if self._batch_ticker_task is not None and not self._batch_ticker_task.done():
+            self._batch_ticker_task.cancel()
+            try:
+                await self._batch_ticker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # 插件关闭前，把所有还攒在队列里、尚未发出去的消息做最后一次检测，
+        # 避免因为插件重载/停用导致这些消息永远没有被检测过。
+        try:
+            await self._flush_all_llm_batches()
+        except Exception:
+            logger.exception("[敏感词过滤] 插件关闭前清空批量队列时发生异常")
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
 
@@ -404,9 +444,18 @@ class SensitiveFilterPlugin(Star):
             logger.exception("[敏感词过滤] 处理违规消息时发生异常")
 
     async def _check_text(
-        self, event: AstrMessageEvent, umo: str, text: str
+        self,
+        event: AstrMessageEvent,
+        umo: str,
+        text: str,
+        allow_batch: bool = True,
     ) -> Tuple[Optional[str], Optional[str]]:
-        """依次尝试本地词库 -> 外部接口 -> AI 语义检测，返回 (命中词/原因, 来源)。"""
+        """依次尝试本地词库 -> 外部接口 -> AI 语义检测，返回 (命中词/原因, 来源)。
+
+        allow_batch=False 用于图片转写出的文字（_check_images 内部调用）：
+        这部分必须立刻拿到结果才能判断这张图片是否违规，不能被攒进批量队列里
+        延后处理，所以会强制走即时检测，忽略批量审核开关。
+        """
         norm_text = normalize_text(text)
 
         if self._get_effective(umo, "local_enabled", True):
@@ -454,6 +503,13 @@ class SensitiveFilterPlugin(Star):
                     )
 
         if self._get_effective(umo, "llm_enabled", False):
+            if allow_batch and self._cfg("llm_batch_enabled", False):
+                # 攒进批量队列，这次调用本身不会立刻得到结果（也因此无法在这条
+                # 消息上调用 stop_event）；真正的命中会在批量结果出来后，由
+                # _flush_llm_batch 直接调用 _handle_violation 来处理。
+                await self._enqueue_for_llm_batch(event, umo, text)
+                return None, None
+
             try:
                 provider_id = (self._cfg("llm_provider_id") or "").strip()
                 if provider_id:
@@ -524,12 +580,121 @@ class SensitiveFilterPlugin(Star):
             extracted_text = (extracted_text or "").strip()
             if extracted_text:
                 hit_word, text_source = await self._check_text(
-                    event, umo, extracted_text
+                    event, umo, extracted_text, allow_batch=False
                 )
                 if hit_word:
                     return hit_word, f"图片文字识别（{text_source}）"
 
         return None, None
+
+    # ------------------------------------------------------------------
+    # AI 语义检测批量队列：攒够 llm_batch_size 条消息或等待超过
+    # llm_batch_max_wait_minutes 后，一次模型调用统一审核，降低调用成本。
+    #
+    # 重要限制：进入这个队列的消息，本次 on_group_message 调用会直接返回
+    # （没有命中），所以无法对它调用 event.stop_event() ——等批量结果出来、
+    # 真正判定违规时，这条消息早已被当作普通消息处理完了（可能已经触发了
+    # 机器人的正常回复）。批量审核能做到“事后撤回/警告/通知”，做不到
+    # “事前拦截”，这是攒批换取省钱的必然代价，已经在 _conf_schema.json 的
+    # hint 和 README 里写明。
+    # ------------------------------------------------------------------
+
+    async def _enqueue_for_llm_batch(
+        self, event: AstrMessageEvent, umo: str, text: str
+    ) -> None:
+        """把一条消息放进批量审核队列；如果攒够了 batch_size，立即触发一次flush。"""
+        should_flush_now = False
+        async with self._llm_batch_lock:
+            bucket = self._llm_batches.setdefault(umo, [])
+            bucket.append((event, umo, text, time.monotonic()))
+            batch_size = int(self._cfg("llm_batch_size", 10) or 10)
+            if len(bucket) >= max(batch_size, 1):
+                should_flush_now = True
+
+        if should_flush_now:
+            await self._flush_llm_batch(umo)
+
+    async def _flush_llm_batch(self, umo: str) -> None:
+        """取出某个会话当前攒到的全部消息，一次模型调用统一审核并处理命中项。"""
+        async with self._llm_batch_lock:
+            bucket = self._llm_batches.pop(umo, [])
+        if not bucket:
+            return
+
+        try:
+            provider_id = (self._cfg("llm_provider_id") or "").strip()
+            if provider_id:
+                provider = self.context.get_provider_by_id(provider_id)
+            else:
+                provider = self.context.get_using_provider(umo=umo)
+            if not provider:
+                logger.warning(
+                    f"[敏感词过滤] 批量审核找不到可用的 Provider（umo={umo}），"
+                    f"本批 {len(bucket)} 条消息未经过 AI 语义检测"
+                )
+                return
+
+            batch_prompt_template = (
+                self._cfg("llm_batch_prompt") or DEFAULT_LLM_BATCH_PROMPT
+            )
+            texts = [item[2] for item in bucket]
+            results = await check_via_llm_batch(
+                provider, texts, prompt_template=batch_prompt_template
+            )
+        except Exception:
+            logger.exception(
+                f"[敏感词过滤] 批量 AI 语义检测失败，本批 {len(bucket)} 条消息未能检测"
+            )
+            return
+
+        for (item_event, item_umo, item_text, _enqueued_at), (
+            violate,
+            reason,
+        ) in zip(bucket, results):
+            if not violate:
+                continue
+            hit_word = reason or "AI 判定违规"
+            sender_id = item_event.get_sender_id()
+            logger.info(
+                f"[敏感词过滤] （批量）会话 {item_umo} 用户 {sender_id} 触发敏感词"
+                f"「{hit_word}」（来源：AI 语义检测·批量）原文：{item_text}"
+            )
+            try:
+                await self._handle_violation(
+                    item_event, item_umo, hit_word, "AI 语义检测（批量）"
+                )
+            except Exception:
+                logger.exception("[敏感词过滤] 处理批量审核命中项时发生异常")
+
+    async def _flush_all_llm_batches(self) -> None:
+        """把所有会话当前攒到的消息都 flush 一遍，用于插件关闭前的收尾。"""
+        async with self._llm_batch_lock:
+            umos = list(self._llm_batches.keys())
+        for umo in umos:
+            await self._flush_llm_batch(umo)
+
+    async def _batch_ticker_loop(self) -> None:
+        """每秒检查一次所有批量队列，把等待超时的队列强制 flush 掉，避免不
+        活跃的会话一直攒不满 batch_size、消息迟迟得不到检测。"""
+        try:
+            while True:
+                await asyncio.sleep(1)
+                await self._flush_overdue_llm_batches()
+        except asyncio.CancelledError:
+            raise
+
+    async def _flush_overdue_llm_batches(self) -> None:
+        max_wait_minutes = float(self._cfg("llm_batch_max_wait_minutes", 30) or 30)
+        max_wait_seconds = max_wait_minutes * 60
+        now = time.monotonic()
+        async with self._llm_batch_lock:
+            overdue_umos = [
+                umo
+                for umo, bucket in self._llm_batches.items()
+                if bucket and (now - bucket[0][3]) >= max_wait_seconds
+            ]
+        for umo in overdue_umos:
+            await self._flush_llm_batch(umo)
 
     async def _handle_violation(
         self,
@@ -626,7 +791,8 @@ class SensitiveFilterPlugin(Star):
             "/敏感词 本群删除 <词>  删除本群专属词\n"
             "/敏感词 设置 <项> <on/off/默认>  本群单独覆盖某个开关\n"
             "    可设置项：总开关/本地/接口/ai/图片/撤回/警告/通知\n"
-            "/敏感词 状态           查看本群当前生效的配置\n"
+            "/敏感词 状态           查看本群当前生效的配置（含批量队列等待情况）\n"
+            "/敏感词 批量发送       立即把本群队列里现存的消息发出去检测，不再等待\n"
             "/敏感词 白名单 开启|关闭|添加本群|删除本群|列表\n"
             "/敏感词 黑名单 开启|关闭|添加本群|删除本群|列表\n"
             "    白名单/黑名单决定“这个群该不该被处理”，与上面的设置完全独立；\n"
@@ -794,6 +960,14 @@ class SensitiveFilterPlugin(Star):
             f"本群专属词库：{len(extra_words)} 个",
             f"umo（在 WebUI「分群配置」里新增条目时请填这个）：{umo}",
         ]
+
+        if self._cfg("llm_batch_enabled", False):
+            pending = len(self._llm_batches.get(umo, []))
+            batch_size = self._cfg("llm_batch_size", 10)
+            lines.append(
+                f"批量审核：已开启，本会话队列里有 {pending}/{batch_size} 条等待发送"
+            )
+
         yield event.plain_result("\n".join(lines))
 
     # ------------------------------------------------------------------
@@ -881,3 +1055,16 @@ class SensitiveFilterPlugin(Star):
             event, "blacklist_enabled", "blacklist_umos", "黑名单"
         ):
             yield r
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @sw_group.command("批量发送")
+    async def cmd_flush_batch(self, event: AstrMessageEvent):
+        """不想等批量审核自然攒满/超时，手动立即把本会话队列里现存的消息
+        发出去检测一次。"""
+        umo = event.unified_msg_origin
+        pending = len(self._llm_batches.get(umo, []))
+        if pending == 0:
+            yield event.plain_result("本会话当前没有等待批量审核的消息")
+            return
+        await self._flush_llm_batch(umo)
+        yield event.plain_result(f"已手动触发批量审核，刚才队列里有 {pending} 条消息")
