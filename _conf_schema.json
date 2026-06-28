@@ -248,7 +248,7 @@
       },
       "api_key": {
         "description": "uapis.cn 接口密钥（可选）",
-        "hint": "仅 api_provider=uapis_profanitycheck 时生效。留空则使用免积分的访客额度调用；填写后会通过 Authorization: Bearer 携带，额度更高更稳定。可在 uapis.cn 控制台的 API Key 页面创建",
+        "hint": "仅 api_provider=uapis_profanitycheck 时生效。uapis.cn 按积分计费，调用一次这个接口消耗 1 积分：不填这项走访客额度，每月 1500 积分；填了走账号额度，每月 3500 积分，并通过 Authorization: Bearer 携带。也就是说每月最多能调用 1500（不填）或 3500（填了）次。",
         "type": "string",
         "default": ""
       },
