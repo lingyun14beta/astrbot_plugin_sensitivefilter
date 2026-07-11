@@ -559,7 +559,7 @@ class SensitiveFilterPlugin(Star):
                     "[敏感词过滤][QQ合并转发调试] "
                     f"forward_id={forward_id} node={node_index} sender={sender!r} "
                     f"text={text!r}"
-            )
+                )
             hit_word, text_source = await self._check_text(
                 event, umo, text, allow_batch=False, allow_llm=not use_llm_batch
             )
@@ -616,7 +616,9 @@ class SensitiveFilterPlugin(Star):
         bot_api = getattr(getattr(event, "bot", None), "api", None)
         call_action = getattr(bot_api, "call_action", None)
         if not callable(call_action):
-            logger.warning("[敏感词过滤] QQ 合并转发无法调用 OneBot API，已跳过内部内容")
+            logger.warning(
+                "[敏感词过滤] QQ 合并转发无法调用 OneBot API，已跳过内部内容"
+            )
             return [], []
 
         results: list[Tuple[str, str, int, str]] = []
@@ -786,7 +788,9 @@ class SensitiveFilterPlugin(Star):
                     provider, image_path, prompt_template=prompt_template
                 )
             except Exception:
-                logger.exception("[敏感词过滤] 调用图片审核 Provider 失败，跳过这张图片")
+                logger.exception(
+                    "[敏感词过滤] 调用图片审核 Provider 失败，跳过这张图片"
+                )
                 continue
 
             if image_violate:
@@ -819,7 +823,9 @@ class SensitiveFilterPlugin(Star):
                 logger.exception("[敏感词过滤] 图片转换为本地路径失败，跳过这张图片")
                 continue
 
-            hit_word, source, _ = await self._check_image_paths(event, umo, [image_path])
+            hit_word, source, _ = await self._check_image_paths(
+                event, umo, [image_path]
+            )
             if hit_word:
                 return hit_word, source
 

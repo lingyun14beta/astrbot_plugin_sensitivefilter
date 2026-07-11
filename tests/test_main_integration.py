@@ -542,7 +542,11 @@ async def run_tests():
     await plugin.on_group_message(ev_forward)
     check(
         "QQ合并转发递归请求root和nested ID",
-        [call[1].get("id") for call in ev_forward.bot.api.calls if call[0] == "get_forward_msg"]
+        [
+            call[1].get("id")
+            for call in ev_forward.bot.api.calls
+            if call[0] == "get_forward_msg"
+        ]
         == [
             "root-forward",
             "nested-forward",
@@ -646,11 +650,7 @@ async def run_tests():
     )
     check(
         "QQ合并转发节点图片命中后撤回当前转发卡",
-        [
-            call
-            for call in ev_forward_image.bot.api.calls
-            if call[0] == "delete_msg"
-        ]
+        [call for call in ev_forward_image.bot.api.calls if call[0] == "delete_msg"]
         == [("delete_msg", {"message_id": "msg-1"})],
     )
     config["image_detection"]["image_enabled"] = False
@@ -690,8 +690,7 @@ async def run_tests():
     await plugin.on_group_message(ev_deep_node)
     check(
         "QQ合并转发深层node在组件深度上限处安全停止",
-        ev_deep_node.bot.api.calls
-        == [("get_forward_msg", {"id": "deep-node-forward"})]
+        ev_deep_node.bot.api.calls == [("get_forward_msg", {"id": "deep-node-forward"})]
         and not ev_deep_node.stopped,
     )
 
