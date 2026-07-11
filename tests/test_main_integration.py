@@ -30,14 +30,29 @@ astrbot_api_event_filter_mod = types.ModuleType("astrbot.api.event.filter")
 astrbot_api_star_mod = types.ModuleType("astrbot.api.star")
 astrbot_api_msgcomp_mod = types.ModuleType("astrbot.api.message_components")
 
+
 # ---- logger / AstrBotConfig ----
-fake_logger = SimpleNamespace(
-    info=lambda *a, **k: None,
-    warning=lambda *a, **k: None,
-    error=lambda *a, **k: None,
-    exception=lambda *a, **k: None,
-    debug=lambda *a, **k: None,
-)
+class FakeLogger:
+    def __init__(self):
+        self.info_entries = []
+
+    def info(self, *args, **kwargs):
+        self.info_entries.append((args, kwargs))
+
+    def warning(self, *args, **kwargs):
+        pass
+
+    def error(self, *args, **kwargs):
+        pass
+
+    def exception(self, *args, **kwargs):
+        pass
+
+    def debug(self, *args, **kwargs):
+        pass
+
+
+fake_logger = FakeLogger()
 astrbot_api_mod.logger = fake_logger
 astrbot_api_mod.AstrBotConfig = dict  # 仅用于类型标注，运行时用我们自己的 FakeConfig
 
@@ -175,9 +190,18 @@ class Image:
         return f"Image(file={self.file!r})"
 
 
+class Forward:
+    def __init__(self, id):
+        self.id = id
+
+    def __repr__(self):
+        return f"Forward(id={self.id!r})"
+
+
 astrbot_api_msgcomp_mod.At = At
 astrbot_api_msgcomp_mod.Plain = Plain
 astrbot_api_msgcomp_mod.Image = Image
+astrbot_api_msgcomp_mod.Forward = Forward
 
 # ---- aiocqhttp 撤回相关（main.py 内部懒加载导入） ----
 aiocqhttp_pkg = types.ModuleType(
@@ -278,17 +302,23 @@ class FakeContext:
 
 
 class FakeAiocqhttpBotApi:
-    def __init__(self):
+    def __init__(self, forward_responses=None):
         self.calls = []
+        self.forward_responses = forward_responses or {}
 
     async def call_action(self, action, **kwargs):
         self.calls.append((action, kwargs))
+        if action == "get_forward_msg":
+            response = self.forward_responses.get(kwargs["id"], {"messages": []})
+            if isinstance(response, Exception):
+                raise response
+            return response
         return {"status": "ok"}
 
 
 class FakeAiocqhttpBot:
-    def __init__(self):
-        self.api = FakeAiocqhttpBotApi()
+    def __init__(self, forward_responses=None):
+        self.api = FakeAiocqhttpBotApi(forward_responses)
 
 
 class FakeEvent(main_mod.AstrMessageEvent if False else object):
@@ -338,8 +368,9 @@ class FakeAiocqhttpEvent(FakeEvent, AiocqhttpMessageEvent):
     platform_name = "aiocqhttp"
 
     def __init__(self, *a, **kw):
+        forward_responses = kw.pop("forward_responses", None)
         FakeEvent.__init__(self, *a, **kw)
-        self.bot = FakeAiocqhttpBot()
+        self.bot = FakeAiocqhttpBot(forward_responses)
 
 
 # ============================================================
@@ -386,6 +417,7 @@ def make_plugin(extra_config=None):
                 "case_insensitive": True,
                 "fuzzy_match": True,
                 "stop_event_on_hit": True,
+                "qq_forward_debug": False,
             },
             "actions": {
                 "recall_enabled": True,
@@ -461,6 +493,254 @@ async def run_tests():
     check("调用的是delete_msg", action == "delete_msg")
     check("传入了正确的message_id", kwargs.get("message_id") == "msg-1")
 
+    # ---------- QQ OneBot 合并转发：递归展开文本，但处罚当前转发发送者 ----------
+    forward_responses = {
+        "root-forward": {
+            "messages": [
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": "original-user-1",
+                        "nickname": "原作者一",
+                        "content": [{"type": "text", "data": {"text": "正常内容"}}],
+                    },
+                },
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": "original-user-2",
+                        "nickname": "原作者二",
+                        "content": [
+                            {"type": "forward", "data": {"id": "nested-forward"}}
+                        ],
+                    },
+                },
+            ]
+        },
+        "nested-forward": {
+            "messages": [
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": "original-user-3",
+                        "nickname": "原作者三",
+                        "content": [{"type": "text", "data": {"text": "广告内容"}}],
+                    },
+                }
+            ]
+        },
+    }
+    set_cfg(config, "qq_forward_debug", True)
+    ev_forward = FakeAiocqhttpEvent(
+        "group-forward",
+        "forward-sender",
+        "转发者",
+        "",
+        images=[Forward("root-forward")],
+        forward_responses=forward_responses,
+    )
+    await plugin.on_group_message(ev_forward)
+    check(
+        "QQ合并转发递归请求root和nested ID",
+        [call[1].get("id") for call in ev_forward.bot.api.calls if call[0] == "get_forward_msg"]
+        == [
+            "root-forward",
+            "nested-forward",
+        ],
+    )
+    check("QQ合并转发内部敏感词会命中", ev_forward.stopped is True)
+    check(
+        "QQ合并转发命中后撤回当前转发卡",
+        [call for call in ev_forward.bot.api.calls if call[0] == "delete_msg"]
+        == [("delete_msg", {"message_id": "msg-1"})],
+    )
+    check(
+        "QQ合并转发命中后警告当前发送者而非节点作者",
+        any(
+            getattr(component, "qq", None) == "forward-sender"
+            for component in ev_forward.sent_results[0][1]
+        ),
+    )
+    check(
+        "QQ合并转发调试日志包含嵌套节点文本",
+        any(
+            "nested-forward" in args[0] and "广告内容" in args[0]
+            for args, _ in fake_logger.info_entries
+        ),
+    )
+    set_cfg(config, "qq_forward_debug", False)
+
+    # ---------- QQ OneBot 合并转发：NapCat 将节点返回为完整 message 事件 ----------
+    event_style_forward_responses = {
+        "event-style-forward": {
+            "messages": [
+                {
+                    "user_id": "original-event-user",
+                    "sender": {"nickname": "原作者事件格式"},
+                    "message": [{"type": "text", "data": {"text": "广告内容"}}],
+                }
+            ]
+        }
+    }
+    ev_event_style_forward = FakeAiocqhttpEvent(
+        "group-event-style-forward",
+        "event-style-sender",
+        "事件格式转发者",
+        "",
+        images=[Forward("event-style-forward")],
+        forward_responses=event_style_forward_responses,
+    )
+    await plugin.on_group_message(ev_event_style_forward)
+    check(
+        "QQ合并转发兼容完整OneBot message事件节点",
+        ev_event_style_forward.stopped is True,
+    )
+    check(
+        "完整OneBot message事件节点命中后撤回当前转发卡",
+        [
+            call
+            for call in ev_event_style_forward.bot.api.calls
+            if call[0] == "delete_msg"
+        ]
+        == [("delete_msg", {"message_id": "msg-1"})],
+    )
+
+    # ---------- QQ OneBot 合并转发：节点图片复用现有视觉审核 ----------
+    config["image_detection"]["image_enabled"] = True
+    config["image_detection"]["image_provider_id"] = "forward-vision"
+    ctx.provider_by_id["forward-vision"] = FakeVisionProvider(
+        '{"image_violate": true, "image_reason": "违规图片", "extracted_text": ""}'
+    )
+    forward_image_responses = {
+        "image-forward": {
+            "messages": [
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": "original-image-user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "data": {"url": "https://example.com/forward.jpg"},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+    }
+    ev_forward_image = FakeAiocqhttpEvent(
+        "group-forward-image",
+        "forward-image-sender",
+        "图片转发者",
+        "",
+        images=[Forward("image-forward")],
+        forward_responses=forward_image_responses,
+    )
+    await plugin.on_group_message(ev_forward_image)
+    check("QQ合并转发节点图片会触发视觉审核", ev_forward_image.stopped is True)
+    check(
+        "QQ合并转发节点图片传给视觉Provider",
+        ctx.provider_by_id["forward-vision"].last_image_urls
+        == ["https://example.com/forward.jpg"],
+    )
+    check(
+        "QQ合并转发节点图片命中后撤回当前转发卡",
+        [
+            call
+            for call in ev_forward_image.bot.api.calls
+            if call[0] == "delete_msg"
+        ]
+        == [("delete_msg", {"message_id": "msg-1"})],
+    )
+    config["image_detection"]["image_enabled"] = False
+    config["image_detection"]["image_provider_id"] = ""
+
+    # ---------- QQ OneBot 合并转发：异常、深层 node 与拉取上限不会中断处理 ----------
+    ev_broken_forward = FakeAiocqhttpEvent(
+        "group-broken-forward",
+        "broken-sender",
+        "异常转发者",
+        "",
+        images=[Forward("broken-forward")],
+        forward_responses={"broken-forward": RuntimeError("协议端故障")},
+    )
+    await plugin.on_group_message(ev_broken_forward)
+    check(
+        "QQ合并转发接口异常时安全跳过内部内容",
+        ev_broken_forward.bot.api.calls
+        == [("get_forward_msg", {"id": "broken-forward"})]
+        and not ev_broken_forward.stopped,
+    )
+
+    deeply_nested_node = {"type": "text", "data": {"text": "广告内容"}}
+    for _ in range(main_mod._QQ_FORWARD_MAX_COMPONENT_DEPTH + 2):
+        deeply_nested_node = {
+            "type": "node",
+            "data": {"user_id": "nested-user", "content": [deeply_nested_node]},
+        }
+    ev_deep_node = FakeAiocqhttpEvent(
+        "group-deep-node",
+        "deep-sender",
+        "深层节点转发者",
+        "",
+        images=[Forward("deep-node-forward")],
+        forward_responses={"deep-node-forward": {"messages": [deeply_nested_node]}},
+    )
+    await plugin.on_group_message(ev_deep_node)
+    check(
+        "QQ合并转发深层node在组件深度上限处安全停止",
+        ev_deep_node.bot.api.calls
+        == [("get_forward_msg", {"id": "deep-node-forward"})]
+        and not ev_deep_node.stopped,
+    )
+
+    wide_forward_responses = {
+        "wide-root": {
+            "messages": [
+                {
+                    "type": "node",
+                    "data": {
+                        "content": [
+                            {"type": "forward", "data": {"id": f"wide-{index}"}}
+                            for index in range(30)
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+    wide_forward_responses.update(
+        {f"wide-{index}": {"messages": []} for index in range(30)}
+    )
+    ev_wide_forward = FakeAiocqhttpEvent(
+        "group-wide-forward",
+        "wide-sender",
+        "分叉转发者",
+        "",
+        images=[Forward("wide-root")],
+        forward_responses=wide_forward_responses,
+    )
+    await plugin.on_group_message(ev_wide_forward)
+    check(
+        "QQ合并转发总拉取次数受上限保护",
+        len(ev_wide_forward.bot.api.calls) == main_mod._QQ_FORWARD_MAX_FETCHES,
+    )
+
+    # ---------- 非 aiocqhttp 平台不请求 OneBot API ----------
+    ev_other_forward = FakeEvent(
+        "group-other-forward",
+        "other-sender",
+        "其他平台用户",
+        "",
+        images=[Forward("root-forward")],
+    )
+    await plugin.on_group_message(ev_other_forward)
+    check(
+        "非aiocqhttp的Forward组件不会触发QQ合并转发处理",
+        not ev_other_forward.stopped and not ev_other_forward.sent_results,
+    )
+
     # ---------- 群级覆盖：本群关闭撤回，仅保留警告 ----------
     ev_qq2 = FakeAiocqhttpEvent("group2", "u4", "赵六", "广告位招租")
     plugin._get_or_create_group_override(ev_qq2.unified_msg_origin)[
@@ -477,6 +757,21 @@ async def run_tests():
     check(
         "本群关闭插件后完全不检测", len(ev_g3.sent_results) == 0 and not ev_g3.stopped
     )
+
+    # ---------- 群级覆盖：全局关闭时本群仍可单独开启插件 ----------
+    config["basic"]["enabled"] = False
+    ev_g3_enabled = FakeEvent(
+        "group3-enabled", "u5-enabled", "孙七", "这是一条含有敏感词的消息"
+    )
+    plugin._get_or_create_group_override(ev_g3_enabled.unified_msg_origin)[
+        "enabled"
+    ] = "开启"
+    await plugin.on_group_message(ev_g3_enabled)
+    check(
+        "全局关闭时本群覆盖开启后仍会检测",
+        len(ev_g3_enabled.sent_results) == 1 and ev_g3_enabled.stopped,
+    )
+    config["basic"]["enabled"] = True
 
     # ---------- 群专属词库 ----------
     ev_g4 = FakeEvent("group4", "u6", "周八", "这里出现了群专属违禁词")
@@ -569,6 +864,66 @@ async def run_tests():
         and "中午吃什么" in batch_provider.last_prompt,
     )
 
+    # ---------- QQ 合并转发在 AI 批量审核中整体作为一条消息入队 ----------
+    forward_batch_responses = {
+        "batch-forward": {
+            "messages": [
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": "original-batch-user-1",
+                        "content": [
+                            {"type": "text", "data": {"text": "转发第一段内容"}}
+                        ],
+                    },
+                },
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": "original-batch-user-2",
+                        "content": [
+                            {"type": "text", "data": {"text": "转发第二段内容"}}
+                        ],
+                    },
+                },
+            ]
+        }
+    }
+    forward_batch_provider = FakeProvider(
+        '{"results": [{"index": 0, "violate": true, "reason": "合并转发违规"}]}'
+    )
+    ctx.using_provider = forward_batch_provider
+    ev_forward_batch = FakeAiocqhttpEvent(
+        "group-forward-batch",
+        "forward-batch-sender",
+        "批量转发发送者",
+        "",
+        images=[Forward("batch-forward")],
+        forward_responses=forward_batch_responses,
+    )
+    await plugin.on_group_message(ev_forward_batch)
+    check(
+        "QQ合并转发批量审核只占一个队列条目",
+        len(plugin._llm_batches.get(ev_forward_batch.unified_msg_origin, [])) == 1,
+    )
+    check(
+        "QQ合并转发批量审核不会即时处理",
+        len(ev_forward_batch.sent_results) == 0 and not ev_forward_batch.stopped,
+    )
+    await plugin._flush_llm_batch(ev_forward_batch.unified_msg_origin)
+    check(
+        "QQ合并转发批量审核输入包含全部节点文本",
+        "转发第一段内容" in forward_batch_provider.last_prompt
+        and "转发第二段内容" in forward_batch_provider.last_prompt,
+    )
+    check(
+        "QQ合并转发批量审核命中后处理卡片发送者",
+        any(
+            getattr(component, "qq", None) == "forward-batch-sender"
+            for component in ev_forward_batch.sent_results[0][1]
+        ),
+    )
+
     # ---------- AI 语义检测：批量审核（超时兜底，不依赖真实sleep） ----------
     ev_b4 = FakeEvent("group_batch2", "u43", "批量丁", "测试超时兜底")
     ctx.using_provider = FakeProvider(
@@ -590,6 +945,31 @@ async def run_tests():
         "超时兜底触发后队列被清空", ev_b4.unified_msg_origin not in plugin._llm_batches
     )
     check("超时兜底触发后命中的消息被警告", len(ev_b4.sent_results) == 1)
+
+    # ---------- 批量队列：入队后关闭本群审核，不再送审或处罚 ----------
+    ev_batch_disabled = FakeEvent(
+        "group-batch-disabled", "u43-disabled", "批量关闭", "排队后关闭审核"
+    )
+    ctx.using_provider = FakeProvider(
+        '{"results": [{"index": 0, "violate": true, "reason": "不应处罚"}]}'
+    )
+    await plugin.on_group_message(ev_batch_disabled)
+    check(
+        "关闭前消息已进入批量队列",
+        len(plugin._llm_batches.get(ev_batch_disabled.unified_msg_origin, [])) == 1,
+    )
+    plugin._get_or_create_group_override(ev_batch_disabled.unified_msg_origin)[
+        "llm_enabled"
+    ] = "关闭"
+    await plugin._flush_llm_batch(ev_batch_disabled.unified_msg_origin)
+    check(
+        "关闭本群AI审核后队列消息不会被处罚",
+        len(ev_batch_disabled.sent_results) == 0,
+    )
+    check(
+        "关闭本群AI审核后队列被丢弃",
+        ev_batch_disabled.unified_msg_origin not in plugin._llm_batches,
+    )
 
     # ---------- 精确验证 llm_batch_max_wait_minutes 确实按分钟换算成秒 ----------
     # 不依赖上面那种数千秒的极端偏移量，专门验证“刚好不够 / 刚好超过”这个边界。
@@ -1111,6 +1491,10 @@ async def run_tests():
     gen_flush = plugin.cmd_flush_batch(ev_manual)
     r_flush = [r async for r in gen_flush]
     check("手动触发批量发送有反馈", len(r_flush) == 1)
+    check(
+        "手动触发批量发送反馈审核结果",
+        "共审核 1 条，命中 1 条" in r_flush[0][1],
+    )
     check(
         "手动触发后队列被清空",
         ev_manual.unified_msg_origin not in plugin._llm_batches,

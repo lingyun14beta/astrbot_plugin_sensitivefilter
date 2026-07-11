@@ -69,6 +69,7 @@ _KEY_TO_SECTION = {
     "case_insensitive": "basic",
     "fuzzy_match": "basic",
     "stop_event_on_hit": "basic",
+    "qq_forward_debug": "basic",
     "recall_enabled": "actions",
     "warn_enabled": "actions",
     "warn_message": "actions",
@@ -100,6 +101,9 @@ _KEY_TO_SECTION = {
 # 通过指令创建条目时，都必须在 __template_key 写入这个值，否则 WebUI 会提示
 # “找不到对应模板”。
 _GROUP_OVERRIDE_TEMPLATE_KEY = "group_override"
+_QQ_FORWARD_MAX_FETCHES = 20
+_QQ_FORWARD_MAX_FORWARD_DEPTH = 5
+_QQ_FORWARD_MAX_COMPONENT_DEPTH = 10
 
 # 群覆盖里的三态开关：字符串「跟随全局/开启/关闭」 <-> Python 的 None/True/False。
 # 之所以不用普通 bool，是因为需要表达“这个群没有单独设置，跟随全局默认值”这第三种状态。
@@ -144,8 +148,8 @@ class SensitiveFilterPlugin(Star):
         self._http_session: Optional[aiohttp.ClientSession] = None
 
         # AI 语义检测的批量缓冲区：每个会话（umo）一个队列，元素是
-        # (event, umo, text, enqueued_at)。只有“消息自身的文字”会被攒批，
-        # 图片转写出的文字（_check_images 内部调用）始终走即时检测，不进队列。
+        # (event, umo, text, enqueued_at)。普通文字消息和 QQ 合并转发各占一个
+        # 批量条目；图片转写出的文字（_check_images 内部调用）始终走即时检测。
         self._llm_batches: dict[str, list[tuple]] = {}
         self._llm_batch_lock = asyncio.Lock()
         self._batch_ticker_task: Optional[asyncio.Task] = None
@@ -403,9 +407,6 @@ class SensitiveFilterPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=50)
     async def on_group_message(self, event: AstrMessageEvent):
-        if not self._cfg("enabled", True):
-            return
-
         group_id = event.get_group_id()
         if not group_id:
             return
@@ -419,12 +420,19 @@ class SensitiveFilterPlugin(Star):
 
         text = (event.message_str or "").strip()
 
+        detected_text = text
         try:
             hit_word = source = None
             if text:
                 hit_word, source = await self._check_text(event, umo, text)
             if not hit_word and self._get_effective(umo, "image_enabled", False):
                 hit_word, source = await self._check_images(event, umo)
+            if not hit_word:
+                hit_word, source, forward_text = await self._check_qq_forward_messages(
+                    event, umo
+                )
+                if forward_text is not None:
+                    detected_text = forward_text
         except Exception:
             logger.exception("[敏感词过滤] 检测过程中发生异常，本次跳过")
             return
@@ -435,11 +443,13 @@ class SensitiveFilterPlugin(Star):
         sender_id = event.get_sender_id()
         logger.info(
             f"[敏感词过滤] 群 {group_id}（{umo}）用户 {sender_id} 触发敏感词「{hit_word}」"
-            f"（来源：{source}）原文：{text}"
+            f"（来源：{source}）原文：{detected_text}"
         )
 
         try:
-            await self._handle_violation(event, umo, hit_word, source)
+            await self._handle_violation(
+                event, umo, hit_word, source, audited_text=detected_text
+            )
         except Exception:
             logger.exception("[敏感词过滤] 处理违规消息时发生异常")
 
@@ -449,6 +459,7 @@ class SensitiveFilterPlugin(Star):
         umo: str,
         text: str,
         allow_batch: bool = True,
+        allow_llm: bool = True,
     ) -> Tuple[Optional[str], Optional[str]]:
         """依次尝试本地词库 -> 外部接口 -> AI 语义检测，返回 (命中词/原因, 来源)。
 
@@ -502,7 +513,7 @@ class SensitiveFilterPlugin(Star):
                         "[敏感词过滤] 调用外部检测接口失败，已跳过此次接口检测"
                     )
 
-        if self._get_effective(umo, "llm_enabled", False):
+        if allow_llm and self._get_effective(umo, "llm_enabled", False):
             if allow_batch and self._cfg("llm_batch_enabled", False):
                 # 攒进批量队列，这次调用本身不会立刻得到结果（也因此无法在这条
                 # 消息上调用 stop_event）；真正的命中会在批量结果出来后，由
@@ -533,6 +544,264 @@ class SensitiveFilterPlugin(Star):
         message = getattr(event.message_obj, "message", None) or []
         return [c for c in message if isinstance(c, Comp.Image)]
 
+    async def _check_qq_forward_messages(
+        self, event: AstrMessageEvent, umo: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """展开 QQ OneBot 合并转发中的文本和图片，并使用现有流程审核。"""
+        forward_texts, forward_images = await self._get_qq_forward_contents(event)
+        use_llm_batch = self._get_effective(umo, "llm_enabled", False) and self._cfg(
+            "llm_batch_enabled", False
+        )
+
+        for text, forward_id, node_index, sender in forward_texts:
+            if self._cfg("qq_forward_debug", False):
+                logger.info(
+                    "[敏感词过滤][QQ合并转发调试] "
+                    f"forward_id={forward_id} node={node_index} sender={sender!r} "
+                    f"text={text!r}"
+            )
+            hit_word, text_source = await self._check_text(
+                event, umo, text, allow_batch=False, allow_llm=not use_llm_batch
+            )
+            if hit_word:
+                source = f"QQ合并转发（{text_source}）"
+                return hit_word, source, text
+
+        if self._get_effective(umo, "image_enabled", False):
+            hit_word, image_source, image_path = await self._check_image_paths(
+                event, umo, forward_images
+            )
+            if hit_word:
+                return hit_word, f"QQ合并转发（{image_source}）", image_path
+
+        if use_llm_batch and forward_texts:
+            # 一个合并转发卡只占批量队列中的一个位置。保留节点边界和原作者信息，
+            # 让模型能按完整转发上下文判断，但批量结果仍对应这张转发卡。
+            batch_text = "\n\n".join(
+                f"[转发节点 {node_index}，原发送者 {sender or '未知'}]\n{text}"
+                for text, _forward_id, node_index, sender in forward_texts
+            )
+            await self._enqueue_for_llm_batch(event, umo, batch_text)
+        return None, None, None
+
+    async def _get_qq_forward_contents(
+        self, event: AstrMessageEvent
+    ) -> Tuple[list[Tuple[str, str, int, str]], list[str]]:
+        """递归读取 aiocqhttp 的 OneBot 合并转发节点文本和图片。
+
+        OneBot 的 forward 段只带转发 ID，需要通过 get_forward_msg 取得节点内容。
+        这里兼容常见的 node/data/content 结构，并限制递归深度和重复 ID，避免协议端
+        返回异常嵌套时无限请求。节点作者只用于调试日志，处罚仍使用原始 event。
+        """
+        if event.get_platform_name() != "aiocqhttp":
+            return [], []
+
+        forward_type = getattr(Comp, "Forward", None)
+        if forward_type is None:
+            return [], []
+        message = getattr(event.message_obj, "message", None) or []
+        forward_ids = [
+            str(component.id)
+            for component in message
+            if isinstance(component, forward_type) and getattr(component, "id", None)
+        ]
+        if not forward_ids:
+            return [], []
+        if self._cfg("qq_forward_debug", False):
+            logger.info(
+                "[敏感词过滤][QQ合并转发调试] "
+                f"检测到合并转发，forward_ids={forward_ids!r}"
+            )
+
+        bot_api = getattr(getattr(event, "bot", None), "api", None)
+        call_action = getattr(bot_api, "call_action", None)
+        if not callable(call_action):
+            logger.warning("[敏感词过滤] QQ 合并转发无法调用 OneBot API，已跳过内部内容")
+            return [], []
+
+        results: list[Tuple[str, str, int, str]] = []
+        image_paths: list[str] = []
+        seen_ids: set[str] = set()
+
+        async def collect_content(
+            content: Any,
+            forward_id: str,
+            node_index: int,
+            sender: str,
+            forward_depth: int,
+            component_depth: int = 0,
+        ) -> list[str]:
+            if component_depth > _QQ_FORWARD_MAX_COMPONENT_DEPTH:
+                return []
+            if isinstance(content, str):
+                return [content]
+            if not isinstance(content, list):
+                return []
+
+            text_parts = []
+            for segment in content:
+                if isinstance(segment, str):
+                    text_parts.append(segment)
+                    continue
+                if not isinstance(segment, dict):
+                    continue
+
+                segment_type = segment.get("type")
+                data = segment.get("data")
+                if not isinstance(data, dict):
+                    data = segment
+                if segment_type == "text":
+                    text = data.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
+                elif segment_type == "image":
+                    image_path = data.get("url") or data.get("file")
+                    if isinstance(image_path, str) and image_path:
+                        image_paths.append(image_path)
+                elif segment_type == "forward":
+                    nested_id = data.get("id")
+                    if nested_id:
+                        await collect_forward(str(nested_id), forward_depth + 1)
+                elif segment_type == "node":
+                    nested_content = data.get("content")
+                    nested_sender = str(data.get("user_id") or sender)
+                    nested_texts = await collect_content(
+                        nested_content,
+                        forward_id,
+                        node_index,
+                        nested_sender,
+                        forward_depth,
+                        component_depth + 1,
+                    )
+                    text_parts.extend(nested_texts)
+            return text_parts
+
+        fetch_count = 0
+
+        async def collect_forward(forward_id: str, forward_depth: int) -> None:
+            nonlocal fetch_count
+            if (
+                forward_depth > _QQ_FORWARD_MAX_FORWARD_DEPTH
+                or forward_id in seen_ids
+                or fetch_count >= _QQ_FORWARD_MAX_FETCHES
+            ):
+                return
+            seen_ids.add(forward_id)
+            fetch_count += 1
+            try:
+                response = await call_action("get_forward_msg", id=forward_id)
+            except Exception as exc:
+                logger.warning(
+                    f"[敏感词过滤] 获取 QQ 合并转发 {forward_id} 失败，"
+                    f"已跳过其内部内容: {exc}"
+                )
+                return
+
+            if isinstance(response, dict):
+                nodes = response.get("messages", response.get("data", []))
+                if isinstance(nodes, dict):
+                    nodes = nodes.get("messages", [])
+            else:
+                nodes = response
+            if not isinstance(nodes, list):
+                if self._cfg("qq_forward_debug", False):
+                    logger.info(
+                        "[敏感词过滤][QQ合并转发调试] "
+                        f"forward_id={forward_id} 返回的节点不是列表: {response!r}"
+                    )
+                return
+            if self._cfg("qq_forward_debug", False):
+                logger.info(
+                    "[敏感词过滤][QQ合并转发调试] "
+                    f"forward_id={forward_id} 成功读取 {len(nodes)} 个节点"
+                )
+
+            for node_index, node in enumerate(nodes, start=1):
+                if not isinstance(node, dict):
+                    if self._cfg("qq_forward_debug", False):
+                        logger.info(
+                            "[敏感词过滤][QQ合并转发调试] "
+                            f"forward_id={forward_id} node={node_index} "
+                            f"节点不是字典，已跳过: {node!r}"
+                        )
+                    continue
+                data = node.get("data")
+                if not isinstance(data, dict):
+                    data = node
+                sender = str(data.get("user_id") or data.get("sender_id") or "")
+                # NapCat 等协议端会把合并转发节点直接返回为完整的 OneBot
+                # message 事件；此时文本段位于顶层 message，而不是 data.content。
+                content = data.get("content")
+                if content is None:
+                    content = data.get("message")
+                if self._cfg("qq_forward_debug", False):
+                    logger.info(
+                        "[敏感词过滤][QQ合并转发调试] "
+                        f"forward_id={forward_id} node={node_index} "
+                        f"sender={sender!r} node={node!r}"
+                    )
+                text = "".join(
+                    await collect_content(
+                        content,
+                        forward_id,
+                        node_index,
+                        sender,
+                        forward_depth,
+                    )
+                ).strip()
+                if text:
+                    results.append((text, forward_id, node_index, sender))
+                elif self._cfg("qq_forward_debug", False):
+                    logger.info(
+                        "[敏感词过滤][QQ合并转发调试] "
+                        f"forward_id={forward_id} node={node_index} "
+                        f"未从 content={content!r} 解析出文本"
+                    )
+
+        for forward_id in forward_ids:
+            await collect_forward(forward_id, 0)
+        return results, image_paths
+
+    async def _check_image_paths(
+        self, event: AstrMessageEvent, umo: str, image_paths: list[str]
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """审核已取得的图片路径，并返回命中原因、来源与命中图片路径。"""
+        if not image_paths:
+            return None, None, None
+
+        provider_id = (self._cfg("image_provider_id") or "").strip()
+        if not provider_id:
+            return None, None, None
+        provider = self.context.get_provider_by_id(provider_id)
+        if not provider:
+            logger.warning(
+                f"[敏感词过滤] 配置的图片审核 Provider「{provider_id}」不存在，已跳过图片检测"
+            )
+            return None, None, None
+
+        prompt_template = self._cfg("image_prompt") or DEFAULT_IMAGE_PROMPT
+        for image_path in image_paths:
+            try:
+                image_violate, image_reason, extracted_text = await check_image(
+                    provider, image_path, prompt_template=prompt_template
+                )
+            except Exception:
+                logger.exception("[敏感词过滤] 调用图片审核 Provider 失败，跳过这张图片")
+                continue
+
+            if image_violate:
+                return image_reason or "AI 判定图片违规", "AI 图片审核", image_path
+
+            extracted_text = (extracted_text or "").strip()
+            if extracted_text:
+                hit_word, text_source = await self._check_text(
+                    event, umo, extracted_text, allow_batch=False
+                )
+                if hit_word:
+                    return hit_word, f"图片文字识别（{text_source}）", image_path
+
+        return None, None, None
+
     async def _check_images(
         self, event: AstrMessageEvent, umo: str
     ) -> Tuple[Optional[str], Optional[str]]:
@@ -543,20 +812,6 @@ class SensitiveFilterPlugin(Star):
         if not images:
             return None, None
 
-        provider_id = (self._cfg("image_provider_id") or "").strip()
-        if not provider_id:
-            # 没有显式配置支持视觉的 Provider 就不执行图片检测，
-            # 不会盲目尝试用当前会话的文字模型去识图。
-            return None, None
-        provider = self.context.get_provider_by_id(provider_id)
-        if not provider:
-            logger.warning(
-                f"[敏感词过滤] 配置的图片审核 Provider「{provider_id}」不存在，已跳过图片检测"
-            )
-            return None, None
-
-        prompt_template = self._cfg("image_prompt") or DEFAULT_IMAGE_PROMPT
-
         for image in images:
             try:
                 image_path = await image.convert_to_file_path()
@@ -564,26 +819,9 @@ class SensitiveFilterPlugin(Star):
                 logger.exception("[敏感词过滤] 图片转换为本地路径失败，跳过这张图片")
                 continue
 
-            try:
-                image_violate, image_reason, extracted_text = await check_image(
-                    provider, image_path, prompt_template=prompt_template
-                )
-            except Exception:
-                logger.exception(
-                    "[敏感词过滤] 调用图片审核 Provider 失败，跳过这张图片"
-                )
-                continue
-
-            if image_violate:
-                return (image_reason or "AI 判定图片违规"), "AI 图片审核"
-
-            extracted_text = (extracted_text or "").strip()
-            if extracted_text:
-                hit_word, text_source = await self._check_text(
-                    event, umo, extracted_text, allow_batch=False
-                )
-                if hit_word:
-                    return hit_word, f"图片文字识别（{text_source}）"
+            hit_word, source, _ = await self._check_image_paths(event, umo, [image_path])
+            if hit_word:
+                return hit_word, source
 
         return None, None
 
@@ -614,12 +852,32 @@ class SensitiveFilterPlugin(Star):
         if should_flush_now:
             await self._flush_llm_batch(umo)
 
-    async def _flush_llm_batch(self, umo: str) -> None:
-        """取出某个会话当前攒到的全部消息，一次模型调用统一审核并处理命中项。"""
+    async def _flush_llm_batch(self, umo: str) -> dict[str, object]:
+        """发送一个批量审核请求，并返回供手动触发指令展示的执行摘要。"""
         async with self._llm_batch_lock:
             bucket = self._llm_batches.pop(umo, [])
         if not bucket:
-            return
+            return {"status": "empty", "total": 0, "violations": 0}
+
+        summary: dict[str, object] = {
+            "status": "completed",
+            "total": len(bucket),
+            "violations": 0,
+        }
+
+        # 队列在等待期间，管理员可能关闭了本群插件/AI 审核，或通过访问控制
+        # 排除了本群。此时不能再把历史排队消息送审或执行处罚。
+        if not (
+            self._is_umo_allowed(umo)
+            and self._get_effective(umo, "enabled", True)
+            and self._get_effective(umo, "llm_enabled", False)
+        ):
+            logger.info(
+                f"[敏感词过滤] 批量队列已因当前配置跳过（umo={umo}，"
+                f"丢弃 {len(bucket)} 条待审核消息）"
+            )
+            summary["status"] = "skipped"
+            return summary
 
         try:
             provider_id = (self._cfg("llm_provider_id") or "").strip()
@@ -632,7 +890,8 @@ class SensitiveFilterPlugin(Star):
                     f"[敏感词过滤] 批量审核找不到可用的 Provider（umo={umo}），"
                     f"本批 {len(bucket)} 条消息未经过 AI 语义检测"
                 )
-                return
+                summary["status"] = "provider_missing"
+                return summary
 
             batch_prompt_template = (
                 self._cfg("llm_batch_prompt") or DEFAULT_LLM_BATCH_PROMPT
@@ -645,7 +904,8 @@ class SensitiveFilterPlugin(Star):
             logger.exception(
                 f"[敏感词过滤] 批量 AI 语义检测失败，本批 {len(bucket)} 条消息未能检测"
             )
-            return
+            summary["status"] = "failed"
+            return summary
 
         for (item_event, item_umo, item_text, _enqueued_at), (
             violate,
@@ -653,6 +913,7 @@ class SensitiveFilterPlugin(Star):
         ) in zip(bucket, results):
             if not violate:
                 continue
+            summary["violations"] = int(summary["violations"]) + 1
             hit_word = reason or "AI 判定违规"
             sender_id = item_event.get_sender_id()
             logger.info(
@@ -665,6 +926,8 @@ class SensitiveFilterPlugin(Star):
                 )
             except Exception:
                 logger.exception("[敏感词过滤] 处理批量审核命中项时发生异常")
+
+        return summary
 
     async def _flush_all_llm_batches(self) -> None:
         """把所有会话当前攒到的消息都 flush 一遍，用于插件关闭前的收尾。"""
@@ -702,6 +965,7 @@ class SensitiveFilterPlugin(Star):
         umo: str,
         hit_word: str,
         source: str,
+        audited_text: Optional[str] = None,
     ) -> None:
         sender_id = event.get_sender_id()
         sender_name = event.get_sender_name()
@@ -730,7 +994,7 @@ class SensitiveFilterPlugin(Star):
                     f"用户: {sender_name}({sender_id})\n"
                     f"来源: {source}\n"
                     f"命中: {hit_word}\n"
-                    f"原文: {event.message_str}"
+                    f"原文: {event.message_str if audited_text is None else audited_text}"
                 )
                 for target_umo in notify_targets:
                     try:
@@ -1066,5 +1330,22 @@ class SensitiveFilterPlugin(Star):
         if pending == 0:
             yield event.plain_result("本会话当前没有等待批量审核的消息")
             return
-        await self._flush_llm_batch(umo)
-        yield event.plain_result(f"已手动触发批量审核，刚才队列里有 {pending} 条消息")
+        summary = await self._flush_llm_batch(umo)
+        status = summary["status"]
+        if status == "completed":
+            yield event.plain_result(
+                f"批量审核完成：共审核 {summary['total']} 条，"
+                f"命中 {summary['violations']} 条"
+            )
+        elif status == "skipped":
+            yield event.plain_result(
+                f"批量审核未执行：{summary['total']} 条待审核消息已因当前群配置被跳过"
+            )
+        elif status == "provider_missing":
+            yield event.plain_result(
+                f"批量审核未执行：找不到可用的 AI Provider，{summary['total']} 条消息未送审"
+            )
+        else:
+            yield event.plain_result(
+                f"批量审核调用失败：{summary['total']} 条消息未完成审核，请查看日志"
+            )

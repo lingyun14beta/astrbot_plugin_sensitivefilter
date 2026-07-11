@@ -146,7 +146,7 @@ async def check_via_llm_batch(
             if not isinstance(item, dict):
                 continue
             idx = item.get("index")
-            if not isinstance(idx, int):
+            if not isinstance(idx, int) or not 0 <= idx < n:
                 continue
             violate = to_bool(item.get("violate", False))
             reason = item.get("reason")

@@ -166,6 +166,22 @@ async def run_batch_tests():
     check("下标乱序时仍按index正确归位-第1条", results3[1] == (False, None))
     check("下标乱序时仍按index正确归位-第2条", results3[2] == (True, "C违规"))
 
+    # 越界索引不能充当有效结果，避免伪造“结果数量与输入一致”。
+    p_out_of_range = FakeProvider(
+        '{"results": ['
+        '{"index": 0, "violate": true, "reason": "第一条违规"}, '
+        '{"index": 99, "violate": true, "reason": "越界结果"}, '
+        '{"index": -1, "violate": true, "reason": "负数结果"}'
+        "]}"
+    )
+    results_out_of_range = await check_via_llm_batch(p_out_of_range, ["消息A", "消息B"])
+    check(
+        "越界索引不会覆盖合法消息结果", results_out_of_range[0] == (True, "第一条违规")
+    )
+    check(
+        "越界和负数索引会被忽略并按未违规兜底", results_out_of_range[1] == (False, None)
+    )
+
     # 完全无法解析（不是预期的{"results": [...]}格式）
     p4 = FakeProvider("我没办法返回JSON")
     results4 = await check_via_llm_batch(p4, ["消息1", "消息2"])
