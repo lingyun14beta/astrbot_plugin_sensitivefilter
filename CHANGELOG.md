@@ -1,8 +1,6 @@
 # Changelog
 
-本项目的主要变更记录在此文件中。
-
-## [Unreleased]
+## [1.1.0]
 
 ### Added
 
