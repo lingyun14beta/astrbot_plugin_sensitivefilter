@@ -410,6 +410,10 @@ def make_plugin(extra_config=None):
                 "blacklist_enabled": False,
                 "blacklist_umos": [],
             },
+            "user_access_control": {
+                "user_whitelist_enabled": True,
+                "user_whitelist_ids": [],
+            },
             "basic": {
                 "enabled": True,
                 "local_enabled": True,
@@ -488,6 +492,27 @@ async def run_tests():
         any("违规次数：第1次" in getattr(c, "text", "") for c in warn_chain),
     )
     check("命中后事件被stop", ev.stopped is True)
+
+    # ---------- 用户白名单：命中用户 ID 后跳过所有审查，不撤回/警告/stop ----------
+    plugin_allow_user, _ctx_allow_user, _cfg_allow_user = make_plugin(
+        {"user_whitelist_ids": ["u-allow"]}
+    )
+    ev_allow_user = FakeEvent(
+        "group1", "u-allow", "白名单用户", "这里出现敏感词但应因用户白名单放行"
+    )
+    await plugin_allow_user.on_group_message(ev_allow_user)
+    check("用户白名单命中后不发送警告", len(ev_allow_user.sent_results) == 0)
+    check("用户白名单命中后不stop_event", ev_allow_user.stopped is False)
+
+    plugin_user_whitelist_off, _ctx_user_whitelist_off, _cfg_user_whitelist_off = make_plugin(
+        {"user_whitelist_enabled": False, "user_whitelist_ids": ["u-allow"]}
+    )
+    ev_user_whitelist_off = FakeEvent(
+        "group1", "u-allow", "白名单关闭用户", "用户白名单关闭时敏感词仍应检测"
+    )
+    await plugin_user_whitelist_off.on_group_message(ev_user_whitelist_off)
+    check("用户白名单关闭后名单用户仍会被审查", len(ev_user_whitelist_off.sent_results) == 1)
+    check("用户白名单关闭后命中会stop_event", ev_user_whitelist_off.stopped is True)
 
     # ---------- 未命中：不应有任何动作 ----------
     ev_clean = FakeEvent("group1", "u2", "李四", "这是一条很正常的消息")
@@ -913,6 +938,25 @@ async def run_tests():
         any("疑似诈骗信息" in getattr(c, "text", "") for c in warn_chain2),
     )
     config["llm_detection"]["llm_enabled"] = False
+
+    # ---------- 用户白名单：批量队列等待期间命中用户白名单后不处罚 ----------
+    plugin_batch_user_allow, ctx_batch_user_allow, cfg_batch_user_allow = make_plugin(
+        {
+            "llm_enabled": True,
+            "llm_batch_enabled": True,
+            "llm_batch_size": 2,
+            "user_whitelist_ids": ["batch-allow"],
+        }
+    )
+    ctx_batch_user_allow.using_provider = FakeProvider(
+        '{"results":[{"index":0,"violate":true,"reason":"批量违规"},{"index":1,"violate":true,"reason":"批量违规"}]}'
+    )
+    ev_batch_user_allow = FakeEvent("group-batch-user", "batch-allow", "白名单批量用户", "批量敏感词1")
+    ev_batch_user_normal = FakeEvent("group-batch-user", "batch-normal", "普通批量用户", "批量敏感词2")
+    await plugin_batch_user_allow.on_group_message(ev_batch_user_allow)
+    await plugin_batch_user_allow.on_group_message(ev_batch_user_normal)
+    check("批量审核中用户白名单命中者不处罚", len(ev_batch_user_allow.sent_results) == 0 and ev_batch_user_allow.stopped is False)
+    check("批量审核中非白名单用户仍处罚", len(ev_batch_user_normal.sent_results) == 1 and ev_batch_user_normal.stopped is True)
 
     # ---------- AI 语义检测：批量审核（按数量触发） ----------
     config["llm_detection"]["llm_enabled"] = True

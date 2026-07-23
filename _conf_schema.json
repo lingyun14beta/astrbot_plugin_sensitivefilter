@@ -30,6 +30,25 @@
       }
     }
   },
+  "user_access_control": {
+    "description": "用户白名单",
+    "hint": "控制哪些用户的发言直接跳过审查，与上方“访问控制”的群白名单/黑名单完全独立（群白名单/黑名单决定群该不该处理，用户白名单只决定某个用户是否跳过审查）。",
+    "type": "object",
+    "items": {
+      "user_whitelist_enabled": {
+        "description": "启用白名单",
+        "hint": "开启后，下方白名单里的用户发言会完全跳过审查；关闭后，列表保留但不生效。",
+        "type": "bool",
+        "default": true
+      },
+      "user_whitelist_ids": {
+        "description": "白名单用户 ID 列表",
+        "hint": "填写发送者用户 ID（例如 QQ 号）；仅在启用白名单时生效。可用 /敏感词 用户白名单 添加 <用户ID> 指令维护。",
+        "type": "list",
+        "default": []
+      }
+    }
+  },
   "group_overrides": {
     "type": "template_list",
     "description": "分群配置",

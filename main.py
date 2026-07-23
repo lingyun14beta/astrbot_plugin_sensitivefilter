@@ -68,6 +68,8 @@ _KEY_TO_SECTION = {
     "enabled": "basic",
     "local_enabled": "basic",
     "words": "basic",
+    "user_whitelist_enabled": "user_access_control",
+    "user_whitelist_ids": "user_access_control",
     "case_insensitive": "basic",
     "fuzzy_match": "basic",
     "stop_event_on_hit": "basic",
@@ -352,6 +354,35 @@ class SensitiveFilterPlugin(Star):
 
         return True
 
+    def _is_user_whitelisted(self, sender_id: str) -> bool:
+        """判断某个用户是否在独立的用户白名单中；命中后完全跳过内容审查。"""
+        if not self._cfg("user_whitelist_enabled", True):
+            return False
+        user_ids = {
+            str(item).strip()
+            for item in (self._cfg("user_whitelist_ids", []) or [])
+            if str(item).strip()
+        }
+        return bool(sender_id) and str(sender_id).strip() in user_ids
+
+    def _add_to_user_whitelist(self, user_id: str) -> bool:
+        user_id = str(user_id).strip()
+        items = [str(item).strip() for item in (self._cfg("user_whitelist_ids", []) or []) if str(item).strip()]
+        if user_id in items:
+            return False
+        items.append(user_id)
+        self._set_cfg("user_whitelist_ids", items)
+        return True
+
+    def _remove_from_user_whitelist(self, user_id: str) -> bool:
+        user_id = str(user_id).strip()
+        items = [str(item).strip() for item in (self._cfg("user_whitelist_ids", []) or []) if str(item).strip()]
+        if user_id not in items:
+            return False
+        items.remove(user_id)
+        self._set_cfg("user_whitelist_ids", items)
+        return True
+
     def _add_to_umo_list(self, list_key: str, umo: str) -> bool:
         """把 umo 加入白名单/黑名单列表，已存在则返回 False。"""
         items = list(self._cfg(list_key, []) or [])
@@ -443,6 +474,13 @@ class SensitiveFilterPlugin(Star):
             return
 
         if not self._get_effective(umo, "enabled", True):
+            return
+
+        sender_id = event.get_sender_id()
+        if self._is_user_whitelisted(sender_id):
+            logger.info(
+                f"[敏感词过滤] 群 {group_id}（{umo}）用户 {sender_id} 命中用户白名单，已跳过审查"
+            )
             return
 
         text = (event.message_str or "").strip()
@@ -946,9 +984,14 @@ class SensitiveFilterPlugin(Star):
         ) in zip(bucket, results):
             if not violate:
                 continue
+            sender_id = item_event.get_sender_id()
+            if self._is_user_whitelisted(sender_id):
+                logger.info(
+                    f"[敏感词过滤] （批量）会话 {item_umo} 用户 {sender_id} 命中用户白名单，已跳过处罚"
+                )
+                continue
             summary["violations"] = int(summary["violations"]) + 1
             hit_word = reason or "AI 判定违规"
-            sender_id = item_event.get_sender_id()
             logger.info(
                 f"[敏感词过滤] （批量）会话 {item_umo} 用户 {sender_id} 触发敏感词"
                 f"「{hit_word}」（来源：AI 语义检测·批量）原文：{item_text}"
@@ -1222,6 +1265,7 @@ class SensitiveFilterPlugin(Star):
             "/敏感词 添加 <词>      全局词库新增一个词\n"
             "/敏感词 删除 <词>      全局词库删除一个词\n"
             "/敏感词 列表           查看全局词库\n"
+            "/敏感词 用户白名单 开启|关闭|添加 <用户ID>|删除 <用户ID>|列表\n"
             "/敏感词 本群添加 <词>  仅本群额外生效的词\n"
             "/敏感词 本群删除 <词>  删除本群专属词\n"
             "/敏感词 设置 <项> <on/off/默认>  本群单独覆盖某个开关\n"
@@ -1230,7 +1274,9 @@ class SensitiveFilterPlugin(Star):
             "/敏感词 批量发送       立即把本群队列里现存的消息发出去检测，不再等待\n"
             "/敏感词 白名单 开启|关闭|添加本群|删除本群|列表\n"
             "/敏感词 黑名单 开启|关闭|添加本群|删除本群|列表\n"
+            "/敏感词 用户白名单 开启|关闭|添加 <用户ID>|删除 <用户ID>|列表\n"
             "    白名单/黑名单决定“这个群该不该被处理”，与上面的设置完全独立；\n"
+            "    用户白名单决定“这个用户的发言是否跳过审查”，与群白名单/黑名单独立；\n"
             "    白名单优先级高于黑名单，详见 WebUI 配置页“访问控制”分组说明\n"
             "提示：以上设置也可以在 WebUI 插件配置页里以可视化形式查看和编辑，"
             "两边操作的是同一份数据。\n"
@@ -1410,6 +1456,64 @@ class SensitiveFilterPlugin(Star):
             )
 
         yield event.plain_result("\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # 用户白名单：独立于群白名单/黑名单，命中用户 ID 后完全跳过该用户发言审查
+    # ------------------------------------------------------------------
+
+    @sw_group.group("用户白名单")
+    def user_whitelist_group(self):
+        """用户白名单管理子指令，见 /敏感词 帮助"""
+        pass
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @user_whitelist_group.command("开启")
+    async def cmd_user_whitelist_on(self, event: AstrMessageEvent):
+        self._set_cfg("user_whitelist_enabled", True)
+        yield event.plain_result("用户白名单已开启：名单内用户的发言将完全跳过审查")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @user_whitelist_group.command("关闭")
+    async def cmd_user_whitelist_off(self, event: AstrMessageEvent):
+        self._set_cfg("user_whitelist_enabled", False)
+        yield event.plain_result("用户白名单已关闭")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @user_whitelist_group.command("添加")
+    async def cmd_user_whitelist_add(self, event: AstrMessageEvent, user_id: str):
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            yield event.plain_result("请提供要添加的用户 ID，例如：/敏感词 用户白名单 添加 123456")
+            return
+        if self._add_to_user_whitelist(user_id):
+            yield event.plain_result(f"已将用户 {user_id} 加入用户白名单")
+        else:
+            yield event.plain_result(f"用户 {user_id} 已在用户白名单中")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @user_whitelist_group.command("删除")
+    async def cmd_user_whitelist_remove(self, event: AstrMessageEvent, user_id: str):
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            yield event.plain_result("请提供要删除的用户 ID，例如：/敏感词 用户白名单 删除 123456")
+            return
+        if self._remove_from_user_whitelist(user_id):
+            yield event.plain_result(f"已将用户 {user_id} 移出用户白名单")
+        else:
+            yield event.plain_result(f"用户 {user_id} 不在用户白名单中")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @user_whitelist_group.command("列表")
+    async def cmd_user_whitelist_list(self, event: AstrMessageEvent):
+        enabled = self._cfg("user_whitelist_enabled", True)
+        items = [str(item).strip() for item in (self._cfg("user_whitelist_ids", []) or []) if str(item).strip()]
+        status = "已开启" if enabled else "已关闭"
+        if not items:
+            yield event.plain_result(f"用户白名单当前{status}，列表为空")
+            return
+        preview = "\n".join(items[:50])
+        more = f"\n（共 {len(items)} 个，仅显示前 50 个）" if len(items) > 50 else ""
+        yield event.plain_result(f"用户白名单当前{status}，共 {len(items)} 个：\n{preview}{more}")
 
     # ------------------------------------------------------------------
     # 白名单 / 黑名单子指令组
