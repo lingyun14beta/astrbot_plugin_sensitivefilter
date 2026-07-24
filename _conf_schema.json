@@ -43,7 +43,7 @@
       },
       "user_whitelist_ids": {
         "description": "白名单用户 ID 列表",
-        "hint": "填写发送者用户 ID（例如 QQ 号）；仅在启用白名单时生效。可用 /敏感词 用户白名单 添加 <用户ID> 指令维护。",
+        "hint": "填写发送者用户 ID，可通过 /sid 指令获取 UID；仅在启用白名单时生效。可用 /敏感词 用户白名单 添加 <用户ID> 指令维护。",
         "type": "list",
         "default": []
       }
