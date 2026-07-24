@@ -589,8 +589,13 @@ async def run_tests():
     ev_no_recall = FakeEvent("group-norecall", "u99", "撤回失败用户", "敏感词")
     await plugin_no_recall.on_group_message(ev_no_recall)
     notify_no_recall = ctx_no_recall.sent_messages[0][1].parts[0]
-    check("非aiocqhttp平台撤回失败通知不含消息已撤回", "消息已撤回" not in notify_no_recall)
-    check("非aiocqhttp平台撤回失败通知仍有处理字段", "处理：禁言0秒" in notify_no_recall)
+    check(
+        "非aiocqhttp平台撤回失败通知不含消息已撤回",
+        "消息已撤回" not in notify_no_recall,
+    )
+    check(
+        "非aiocqhttp平台撤回失败通知仍有处理字段", "处理：禁言0秒" in notify_no_recall
+    )
 
     # ---------- 撤回关闭时不显示消息已撤回 ----------
     plugin_recall_off, ctx_recall_off, _cfg_recall_off = make_plugin(
