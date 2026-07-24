@@ -573,8 +573,39 @@ async def run_tests():
     check("管理员通知模板渲染用户", "用户：模板用户 (20002)" in notify_text)
     check("管理员通知模板渲染敏感词", "敏感词：敏感词" in notify_text)
     check("管理员通知模板渲染原文", "原文：这是一条含有敏感词的消息" in notify_text)
-    check("管理员通知模板渲染禁言时长", "处理：禁言60秒" in notify_text)
+    check("管理员通知模板渲染禁言时长", "处理：禁言60秒，消息已撤回" in notify_text)
     check("管理员通知模板渲染时间", "时间：" in notify_text)
+
+    # ---------- 撤回状态模板变量：非 aiocqhttp 平台撤回失败，recall_status 为空 ----------
+    plugin_no_recall, ctx_no_recall, _cfg_no_recall = make_plugin(
+        {
+            "mute_enabled": False,
+            "notify_enabled": True,
+            "notify_umos": ["aiocqhttp:FriendMessage:admin"],
+            "recall_enabled": True,
+            "warn_enabled": False,
+        }
+    )
+    ev_no_recall = FakeEvent("group-norecall", "u99", "撤回失败用户", "敏感词")
+    await plugin_no_recall.on_group_message(ev_no_recall)
+    notify_no_recall = ctx_no_recall.sent_messages[0][1].parts[0]
+    check("非aiocqhttp平台撤回失败通知不含消息已撤回", "消息已撤回" not in notify_no_recall)
+    check("非aiocqhttp平台撤回失败通知仍有处理字段", "处理：禁言0秒" in notify_no_recall)
+
+    # ---------- 撤回关闭时不显示消息已撤回 ----------
+    plugin_recall_off, ctx_recall_off, _cfg_recall_off = make_plugin(
+        {
+            "mute_enabled": False,
+            "notify_enabled": True,
+            "notify_umos": ["aiocqhttp:FriendMessage:admin"],
+            "recall_enabled": False,
+            "warn_enabled": False,
+        }
+    )
+    ev_recall_off = FakeAiocqhttpEvent("group-off", "u98", "撤回关闭用户", "敏感词")
+    await plugin_recall_off.on_group_message(ev_recall_off)
+    notify_recall_off = ctx_recall_off.sent_messages[0][1].parts[0]
+    check("撤回关闭通知不含消息已撤回", "消息已撤回" not in notify_recall_off)
 
     plugin_custom_tpl, _ctx_custom_tpl, _cfg_custom_tpl = make_plugin(
         {
@@ -1188,6 +1219,38 @@ async def run_tests():
     check(
         "确实把图片路径传给了视觉Provider",
         ctx.provider_by_id["vision-1"].last_image_urls == ["https://example.com/b.jpg"],
+    )
+
+    # ---------- 图片违规时通知原文显示图片标识文案 ----------
+    plugin_img_notify, ctx_img_notify, _cfg_img_notify = make_plugin(
+        {
+            "image_detection": {"image_enabled": True, "image_provider_id": "vision-1"},
+            "recall_enabled": False,
+            "mute_enabled": False,
+            "warn_enabled": False,
+            "notify_enabled": True,
+            "notify_umos": ["aiocqhttp:FriendMessage:admin"],
+        }
+    )
+    ctx_img_notify.provider_by_id["vision-1"] = FakeVisionProvider(
+        '{"image_violate": true, "image_reason": "血腥暴力画面", "extracted_text": ""}'
+    )
+    ev_img_notify = FakeEvent(
+        "group_img1",
+        "u31-notify",
+        "图片通知测试",
+        "",
+        images=[Image(file="https://example.com/e.jpg")],
+    )
+    await plugin_img_notify.on_group_message(ev_img_notify)
+    check(
+        "图片违规时管理员通知发送到配置的umo",
+        ctx_img_notify.sent_messages[0][0] == "aiocqhttp:FriendMessage:admin",
+    )
+    img_notify_text = ctx_img_notify.sent_messages[0][1].parts[0]
+    check(
+        "图片违规通知原文显示图片标识",
+        "原文：图片消息（已识别到违禁内容）" in img_notify_text,
     )
 
     # ---------- 图片检测：图片本身不违规，但文字命中本地词库 ----------
