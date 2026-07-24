@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """外部接口检测。
 
 提供两种模式：
@@ -22,7 +21,6 @@ import json
 from typing import Any
 
 import aiohttp
-
 from astrbot.api import logger
 
 from .utils import to_bool
@@ -109,7 +107,7 @@ async def check_via_api(
         headers = json.loads(headers_json) if headers_json else {}
         if not isinstance(headers, dict):
             headers = {}
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("[敏感词过滤] api_headers 不是合法 JSON，已忽略自定义请求头")
         headers = {}
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """对 api_checkers.py 的功能性测试。
 
 - check_via_uapis_profanitycheck: 起一个真实的本地 aiohttp 服务器模拟
@@ -228,7 +227,7 @@ async def run_generic_api_tests():
         check("POST自定义字段路径-原因正确", reason == "命中关键词")
 
         # POST 未命中
-        hit2, reason2 = await check_via_api(
+        hit2, _reason2 = await check_via_api(
             session,
             "这是一条正常内容",
             api_url=f"{base_url}/check",
@@ -275,7 +274,7 @@ async def run_generic_api_tests():
                 method="POST",
                 timeout=1.0,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             raised = True
         check("不可达地址抛出异常(由main.py兜底)", raised is True)
 

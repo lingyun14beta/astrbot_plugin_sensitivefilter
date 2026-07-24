@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """对 llm_checker.py 的功能性测试。
 
 用一个假的 provider 对象模拟 AstrBot 的 LLM Provider，覆盖“干净 JSON”
@@ -111,7 +110,7 @@ async def run_llm_tests():
     check("LLM无法解析时reason为None", reason3 is None)
 
     # provider 为 None（未配置）
-    violate4, reason4 = await check_via_llm(None, "任意内容")
+    violate4, _reason4 = await check_via_llm(None, "任意内容")
     check("provider为None时安全返回False", violate4 is False)
 
     # 自定义模板忘记写 {text} 占位符时，仍应把原文追加进去兜底

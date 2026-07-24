@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 轻量级敏感词匹配器。
 
@@ -17,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Set
+from collections.abc import Iterable
 
 # 树中用于标记“一个词在此结束”的特殊 key，正常字符不会与之冲突
 _END = "\0__end__"
@@ -25,7 +24,7 @@ _END = "\0__end__"
 # 默认的“干扰字符”集合：空格、常见标点、下划线等。
 # 模糊匹配时，只要已经匹配上至少一个字符，后续遇到这些字符会被跳过，
 # 而不会打断匹配过程。
-DEFAULT_SKIP_CHARS: Set[str] = set(
+DEFAULT_SKIP_CHARS: set[str] = set(
     " \t\u3000*_-.,，。！？·~`'\"“”‘’()（）[]【】{}<>|/\\=+"
 )
 
@@ -45,10 +44,9 @@ def normalize_text(text: str) -> str:
         if ch in text:
             text = text.replace(ch, "")
     # 全角字符 U+FF01-U+FF5E 与对应半角字符相差 0xFEE0
-    text = "".join(
+    return "".join(
         chr(ord(ch) - 0xFEE0) if 0xFF01 <= ord(ch) <= 0xFF5E else ch for ch in text
     )
-    return text
 
 
 class WordTrie:
@@ -58,7 +56,7 @@ class WordTrie:
         self,
         case_insensitive: bool = True,
         fuzzy: bool = True,
-        skip_chars: Optional[Set[str]] = None,
+        skip_chars: set[str] | None = None,
     ):
         self.case_insensitive = case_insensitive
         self.fuzzy = fuzzy
@@ -95,7 +93,7 @@ class WordTrie:
         for w in words or []:
             self.add_word(w)
 
-    def find_first(self, text: str) -> Optional[str]:
+    def find_first(self, text: str) -> str | None:
         """返回文本中命中的第一个敏感词（原始大小写形式），未命中返回 None。"""
         if not self.root or not text:
             return None
@@ -120,11 +118,11 @@ class WordTrie:
             # 当前起点没有命中任何词，继续从下一个字符开始尝试
         return None
 
-    def find_all(self, text: str, limit: int = 20) -> List[str]:
+    def find_all(self, text: str, limit: int = 20) -> list[str]:
         """返回文本中命中的全部敏感词（去重，按出现顺序），主要用于日志/审计。"""
         if not self.root or not text:
             return []
-        results: List[str] = []
+        results: list[str] = []
         n = len(text)
         for i in range(n):
             node = self.root

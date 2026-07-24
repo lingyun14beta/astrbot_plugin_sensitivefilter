@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 """跨模块共享的小工具函数。"""
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional
+from typing import Any
 
 _TRUTHY_STRINGS = ("1", "true", "yes", "y", "hit", "命中", "是")
 
@@ -27,7 +26,7 @@ def to_bool(value: Any) -> bool:
     return bool(value)
 
 
-def extract_json(text: str) -> Optional[dict]:
+def extract_json(text: str) -> dict | None:
     """从 LLM 回复中尽量提取出一个 JSON 对象（模型有时会附带多余文字）。
 
     供 llm_checker.py（文字语义审核）和 image_checker.py（图片审核）共用，
@@ -38,12 +37,12 @@ def extract_json(text: str) -> Optional[dict]:
     text = text.strip()
     try:
         return json.loads(text)
-    except Exception:
+    except Exception:  # noqa: S110, BLE001
         pass
     m = _JSON_OBJ_RE.search(text)
     if m:
         try:
             return json.loads(m.group(0))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
     return None

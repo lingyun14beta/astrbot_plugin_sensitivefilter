@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 群聊敏感词检测插件。
 
@@ -21,14 +20,13 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timedelta
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import aiohttp
-
+import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
-import astrbot.api.message_components as Comp
 
 from .api_checkers import (
     UAPIS_PROFANITYCHECK_URL,
@@ -168,7 +166,7 @@ class SensitiveFilterPlugin(Star):
 
         self._rebuild_global_trie()
 
-        self._http_session: Optional[aiohttp.ClientSession] = None
+        self._http_session: aiohttp.ClientSession | None = None
 
         # AI 语义检测的批量缓冲区：每个会话（umo）一个队列，元素是
         # (event, umo, text, enqueued_at)。普通文字消息和 QQ 合并转发各占一个
@@ -178,7 +176,7 @@ class SensitiveFilterPlugin(Star):
         # 计数只保存在内存中；AstrBot 重启/插件重载后会重新开始计数。
         self._violation_counts: dict[tuple[str, str], tuple[str, int]] = {}
         self._llm_batch_lock = asyncio.Lock()
-        self._batch_ticker_task: Optional[asyncio.Task] = None
+        self._batch_ticker_task: asyncio.Task | None = None
         try:
             self._batch_ticker_task = asyncio.create_task(self._batch_ticker_loop())
         except RuntimeError:
@@ -199,13 +197,13 @@ class SensitiveFilterPlugin(Star):
             self._batch_ticker_task.cancel()
             try:
                 await self._batch_ticker_task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: S110, BLE001
                 pass
         # 插件关闭前，把所有还攒在队列里、尚未发出去的消息做最后一次检测，
         # 避免因为插件重载/停用导致这些消息永远没有被检测过。
         try:
             await self._flush_all_llm_batches()
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception("[敏感词过滤] 插件关闭前清空批量队列时发生异常")
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
@@ -227,7 +225,7 @@ class SensitiveFilterPlugin(Star):
         )
         self.global_trie.build(words)
 
-    def _get_group_trie(self, umo: str) -> Optional[WordTrie]:
+    def _get_group_trie(self, umo: str) -> WordTrie | None:
         override = self._find_group_override(umo)
         extra_words = (override or {}).get("extra_words") or []
         if not extra_words:
@@ -272,7 +270,7 @@ class SensitiveFilterPlugin(Star):
     def _get_group_overrides(self) -> list:
         return self.config.setdefault("group_overrides", [])
 
-    def _find_group_override(self, umo: str) -> Optional[dict]:
+    def _find_group_override(self, umo: str) -> dict | None:
         for item in self._get_group_overrides():
             if str(item.get("umo", "")) == str(umo):
                 return item
@@ -340,10 +338,8 @@ class SensitiveFilterPlugin(Star):
         """
         if self._cfg("whitelist_enabled", False):
             whitelist = self._cfg("whitelist_umos", []) or []
-            if umo in whitelist:
-                return True
             # 开启了白名单模式但没命中：不管黑名单状态如何，直接拒绝
-            return False
+            return umo in whitelist
 
         if self._cfg("blacklist_enabled", False):
             blacklist = self._cfg("blacklist_umos", []) or []
@@ -462,7 +458,7 @@ class SensitiveFilterPlugin(Star):
                 )
                 if forward_text is not None:
                     detected_text = forward_text
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception("[敏感词过滤] 检测过程中发生异常，本次跳过")
             return
 
@@ -479,7 +475,7 @@ class SensitiveFilterPlugin(Star):
             await self._handle_violation(
                 event, umo, hit_word, source, audited_text=detected_text
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception("[敏感词过滤] 处理违规消息时发生异常")
 
     async def _check_text(
@@ -489,7 +485,7 @@ class SensitiveFilterPlugin(Star):
         text: str,
         allow_batch: bool = True,
         allow_llm: bool = True,
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         """依次尝试本地词库 -> 外部接口 -> AI 语义检测，返回 (命中词/原因, 来源)。
 
         allow_batch=False 用于图片转写出的文字（_check_images 内部调用）：
@@ -537,7 +533,7 @@ class SensitiveFilterPlugin(Star):
                         )
                     if hit:
                         return (reason or "外部接口判定命中"), "外部接口"
-                except Exception:
+                except Exception:  # noqa: BLE001
                     logger.exception(
                         "[敏感词过滤] 调用外部检测接口失败，已跳过此次接口检测"
                     )
@@ -563,7 +559,7 @@ class SensitiveFilterPlugin(Star):
                     )
                     if violate:
                         return (reason or "AI 判定违规"), "AI 语义检测"
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.exception("[敏感词过滤] AI 语义检测失败，已跳过此次检测")
 
         return None, None
@@ -575,7 +571,7 @@ class SensitiveFilterPlugin(Star):
 
     async def _check_qq_forward_messages(
         self, event: AstrMessageEvent, umo: str
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None, str | None]:
         """展开 QQ OneBot 合并转发中的文本和图片，并使用现有流程审核。"""
         forward_texts, forward_images = await self._get_qq_forward_contents(event)
         use_llm_batch = self._get_effective(umo, "llm_enabled", False) and self._cfg(
@@ -615,7 +611,7 @@ class SensitiveFilterPlugin(Star):
 
     async def _get_qq_forward_contents(
         self, event: AstrMessageEvent
-    ) -> Tuple[list[Tuple[str, str, int, str]], list[str]]:
+    ) -> tuple[list[tuple[str, str, int, str]], list[str]]:
         """递归读取 aiocqhttp 的 OneBot 合并转发节点文本和图片。
 
         OneBot 的 forward 段只带转发 ID，需要通过 get_forward_msg 取得节点内容。
@@ -650,7 +646,7 @@ class SensitiveFilterPlugin(Star):
             )
             return [], []
 
-        results: list[Tuple[str, str, int, str]] = []
+        results: list[tuple[str, str, int, str]] = []
         image_paths: list[str] = []
         seen_ids: set[str] = set()
 
@@ -721,7 +717,7 @@ class SensitiveFilterPlugin(Star):
             fetch_count += 1
             try:
                 response = await call_action("get_forward_msg", id=forward_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     f"[敏感词过滤] 获取 QQ 合并转发 {forward_id} 失败，"
                     f"已跳过其内部内容: {exc}"
@@ -795,7 +791,7 @@ class SensitiveFilterPlugin(Star):
 
     async def _check_image_paths(
         self, event: AstrMessageEvent, umo: str, image_paths: list[str]
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None, str | None]:
         """审核已取得的图片路径，并返回命中原因、来源与命中图片路径。"""
         if not image_paths:
             return None, None, None
@@ -816,7 +812,7 @@ class SensitiveFilterPlugin(Star):
                 image_violate, image_reason, extracted_text = await check_image(
                     provider, image_path, prompt_template=prompt_template
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.exception(
                     "[敏感词过滤] 调用图片审核 Provider 失败，跳过这张图片"
                 )
@@ -837,7 +833,7 @@ class SensitiveFilterPlugin(Star):
 
     async def _check_images(
         self, event: AstrMessageEvent, umo: str
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         """对消息里的图片做检测：先看图片内容本身是否违规，再把图片里的文字
         转写出来复用现有的文字检测流水线。任意一张图片命中即返回，不再继续看
         后面的图片。"""
@@ -848,7 +844,7 @@ class SensitiveFilterPlugin(Star):
         for image in images:
             try:
                 image_path = await image.convert_to_file_path()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.exception("[敏感词过滤] 图片转换为本地路径失败，跳过这张图片")
                 continue
 
@@ -935,7 +931,7 @@ class SensitiveFilterPlugin(Star):
             results = await check_via_llm_batch(
                 provider, texts, prompt_template=batch_prompt_template
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception(
                 f"[敏感词过滤] 批量 AI 语义检测失败，本批 {len(bucket)} 条消息未能检测"
             )
@@ -959,7 +955,7 @@ class SensitiveFilterPlugin(Star):
                 await self._handle_violation(
                     item_event, item_umo, hit_word, "AI 语义检测（批量）"
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.exception("[敏感词过滤] 处理批量审核命中项时发生异常")
 
         return summary
@@ -974,12 +970,9 @@ class SensitiveFilterPlugin(Star):
     async def _batch_ticker_loop(self) -> None:
         """每秒检查一次所有批量队列，把等待超时的队列强制 flush 掉，避免不
         活跃的会话一直攒不满 batch_size、消息迟迟得不到检测。"""
-        try:
-            while True:
-                await asyncio.sleep(1)
-                await self._flush_overdue_llm_batches()
-        except asyncio.CancelledError:
-            raise
+        while True:
+            await asyncio.sleep(1)
+            await self._flush_overdue_llm_batches()
 
     async def _flush_overdue_llm_batches(self) -> None:
         max_wait_minutes = float(self._cfg("llm_batch_max_wait_minutes", 30) or 30)
@@ -1000,7 +993,7 @@ class SensitiveFilterPlugin(Star):
         umo: str,
         hit_word: str,
         source: str,
-        audited_text: Optional[str] = None,
+        audited_text: str | None = None,
     ) -> None:
         sender_id = event.get_sender_id()
         sender_name = event.get_sender_name()
@@ -1053,7 +1046,7 @@ class SensitiveFilterPlugin(Star):
                         await self.context.send_message(
                             target_umo, MessageChain().message(notify_text)
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         logger.exception(f"[敏感词过滤] 发送通知到 {target_umo} 失败")
 
         if self._cfg("stop_event_on_hit", True):
@@ -1094,7 +1087,7 @@ class SensitiveFilterPlugin(Star):
             "violation_count": str(violation_count),
             "ban_duration": str(max(int(ban_duration or 0), 0)),
             "source": str(source or ""),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
             # 兼容旧模板变量，便于已有用户平滑升级。
             "sender": str(sender_name or ""),
             "word": forbidden_words,
@@ -1118,7 +1111,7 @@ class SensitiveFilterPlugin(Star):
         except (TypeError, ValueError):
             reset_hour = 0
         reset_hour = min(max(reset_hour, 0), 23)
-        now = datetime.now()
+        now = datetime.now().astimezone()
         period_day = now.date()
         if now.hour < reset_hour:
             period_day = (now - timedelta(days=1)).date()
@@ -1178,13 +1171,14 @@ class SensitiveFilterPlugin(Star):
                 f"[敏感词过滤] 已对群 {group_id} 用户 {sender_id} 执行自动禁言："
                 f"本周期第 {violation_count} 次违规，时长 {duration_seconds} 秒"
             )
-            return True
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception(
                 "[敏感词过滤] 自动禁言失败（可能是机器人无管理员权限、"
                 "目标是管理员/群主或协议端不支持 set_group_ban）"
             )
             return False
+        else:
+            return True
 
     async def _try_recall(self, event: AstrMessageEvent) -> bool:
         """尝试撤回触发违规的消息。不同平台支持情况不同，失败只记录日志不抛异常。"""
@@ -1207,7 +1201,7 @@ class SensitiveFilterPlugin(Star):
                     "已跳过撤回操作（不影响警告/通知）"
                 )
                 return False
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception(
                 "[敏感词过滤] 撤回消息失败（可能是机器人无管理员权限或消息已超过可撤回时限）"
             )
@@ -1220,7 +1214,6 @@ class SensitiveFilterPlugin(Star):
     @filter.command_group("敏感词")
     def sw_group(self):
         """敏感词检测插件管理指令，发送 /敏感词 帮助 查看全部用法"""
-        pass
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @sw_group.command("帮助")
@@ -1348,7 +1341,7 @@ class SensitiveFilterPlugin(Star):
 
         value_norm = value.strip().lower()
         if value_norm in _ON_VALUES:
-            new_value: Optional[bool] = True
+            new_value: bool | None = True
         elif value_norm in _OFF_VALUES:
             new_value = False
         elif value_norm in _FOLLOW_VALUES:
@@ -1426,7 +1419,6 @@ class SensitiveFilterPlugin(Star):
     @sw_group.group("白名单")
     def whitelist_group(self):
         """白名单管理子指令，见 /敏感词 帮助"""
-        pass
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @whitelist_group.command("开启")
@@ -1467,7 +1459,6 @@ class SensitiveFilterPlugin(Star):
     @sw_group.group("黑名单")
     def blacklist_group(self):
         """黑名单管理子指令，见 /敏感词 帮助"""
-        pass
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @blacklist_group.command("开启")

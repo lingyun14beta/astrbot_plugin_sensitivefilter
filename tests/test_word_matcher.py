@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """对 word_matcher.py 的功能性测试（非 astrbot 依赖，纯逻辑验证）。
 
 直接运行：python3 test_word_matcher.py

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """对 image_checker.py 的功能性测试。
 
 用一个假的 provider 对象模拟支持视觉的 LLM Provider，覆盖"图片违规"
@@ -101,7 +100,7 @@ async def run_tests():
     p3 = FakeVisionProvider(
         '{"image_violate": false, "image_reason": "", "extracted_text": ""}'
     )
-    violate3, reason3, text3 = await check_image(p3, "/tmp/fake3.jpg")
+    violate3, _reason3, text3 = await check_image(p3, "/tmp/fake3.jpg")
     check("无文字无违规-判定正确", violate3 is False)
     check("无文字无违规-文字为空", text3 == "")
 
@@ -142,7 +141,7 @@ async def run_tests():
     p8 = FakeVisionProvider(
         '{"image_violate": true, "image_reason": "", "extracted_text": ""}'
     )
-    violate8, reason8, _ = await check_image(p8, "/tmp/fake8.jpg")
+    _violate8, reason8, _ = await check_image(p8, "/tmp/fake8.jpg")
     check("violate为true但reason是空串时reason归一化为None", reason8 is None)
 
 

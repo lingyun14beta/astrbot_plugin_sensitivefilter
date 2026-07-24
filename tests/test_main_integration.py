@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 对 main.py 的端到端集成测试。
 
@@ -943,7 +942,7 @@ async def run_tests():
     ev_llm = FakeEvent("group6", "u9", "钱十一", "加我私聊领取奖品")
     await plugin.on_group_message(ev_llm)
     check("LLM检测命中后发出警告", len(ev_llm.sent_results) == 1)
-    warn_kind2, warn_chain2 = ev_llm.sent_results[0]
+    _warn_kind2, warn_chain2 = ev_llm.sent_results[0]
     check(
         "LLM命中原因体现在警告文案中",
         any("疑似诈骗信息" in getattr(c, "text", "") for c in warn_chain2),
@@ -989,7 +988,7 @@ async def run_tests():
     check("批量命中的那条(第2条)被警告", len(ev_b2.sent_results) == 1)
     check("批量未命中的不会被警告-第1条", len(ev_b1.sent_results) == 0)
     check("批量未命中的不会被警告-第3条", len(ev_b3.sent_results) == 0)
-    warn_kind_batch, warn_chain_batch = ev_b2.sent_results[0]
+    _warn_kind_batch, warn_chain_batch = ev_b2.sent_results[0]
     check(
         "批量命中原因体现在警告文案中",
         any("广告引流" in getattr(c, "text", "") for c in warn_chain_batch),
@@ -1216,7 +1215,7 @@ async def run_tests():
     )
     await plugin.on_group_message(ev_img_violate)
     check("图片内容违规时发出警告", len(ev_img_violate.sent_results) == 1)
-    warn_kind_img, warn_chain_img = ev_img_violate.sent_results[0]
+    _warn_kind_img, warn_chain_img = ev_img_violate.sent_results[0]
     check(
         "图片违规原因体现在警告文案中",
         any("血腥暴力画面" in getattr(c, "text", "") for c in warn_chain_img),
@@ -1274,7 +1273,7 @@ async def run_tests():
     )
     await plugin.on_group_message(ev_img_text_hit)
     check("图片文字命中本地词库时发出警告", len(ev_img_text_hit.sent_results) == 1)
-    warn_kind_img2, warn_chain_img2 = ev_img_text_hit.sent_results[0]
+    _warn_kind_img2, warn_chain_img2 = ev_img_text_hit.sent_results[0]
     check(
         "图片文字识别命中词体现在警告文案中",
         any("敏感词" in getattr(c, "text", "") for c in warn_chain_img2),
@@ -1353,7 +1352,7 @@ async def run_tests():
     ev_api = FakeEvent("group7", "u10", "冯十二", "这是一个诈骗信息")
     await plugin.on_group_message(ev_api)
     check("uapis接口检测端到端命中并发出警告", len(ev_api.sent_results) == 1)
-    warn_kind3, warn_chain3 = ev_api.sent_results[0]
+    _warn_kind3, warn_chain3 = ev_api.sent_results[0]
     check(
         "外部接口命中词体现在警告文案中",
         any("诈骗" in getattr(c, "text", "") for c in warn_chain3),

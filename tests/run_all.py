@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """一键运行 tests/ 目录下的全部测试脚本，并汇总结果。
 
 用法：
@@ -32,7 +31,7 @@ def main() -> int:
     for name in TEST_FILES:
         path = TESTS_DIR / name
         print(f"\n{'=' * 60}\n运行 {name}\n{'=' * 60}")
-        result = subprocess.run([sys.executable, str(path)])
+        result = subprocess.run([sys.executable, str(path)], check=False)
         ok = result.returncode == 0
         overall_ok = overall_ok and ok
         summary.append((name, ok))
