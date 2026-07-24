@@ -1394,11 +1394,13 @@ class SensitiveFilterPlugin(Star):
             fmt("warn_enabled", "命中后警告"),
             fmt("notify_enabled", "命中后通知"),
             fmt("mute_enabled", "命中后自动禁言"),
-            "自动禁言阶梯："
-            f"第1次 {self._cfg('mute_first_duration_seconds', 60)} 秒 / "
-            f"第2次 {self._cfg('mute_second_duration_seconds', 300)} 秒 / "
-            f"第3次及以上 {self._cfg('mute_third_duration_seconds', 86400)} 秒，"
-            f"每日 {self._cfg('mute_reset_hour', 0)} 点重置",
+            (
+                "自动禁言阶梯："
+                f"第1次 {self._cfg('mute_first_duration_seconds', 60)} 秒 / "
+                f"第2次 {self._cfg('mute_second_duration_seconds', 300)} 秒 / "
+                f"第3次及以上 {self._cfg('mute_third_duration_seconds', 86400)} 秒，"
+                f"每日 {self._cfg('mute_reset_hour', 0)} 点重置"
+            ),
             f"本群专属词库：{len(extra_words)} 个",
             f"umo（在 WebUI「分群配置」里新增条目时请填这个）：{umo}",
         ]

@@ -243,7 +243,7 @@ PLUGIN_DIR = (
 PARENT_DIR = PLUGIN_DIR.parent  # 包含插件目录本身的上级目录
 sys.path.insert(0, str(PARENT_DIR))
 
-import importlib  # noqa: E402
+import importlib
 
 pkg = types.ModuleType("astrbot_plugin_sensitivefilter")
 pkg.__path__ = [str(PLUGIN_DIR)]
