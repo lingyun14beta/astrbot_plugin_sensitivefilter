@@ -142,7 +142,7 @@ _ON_VALUES = {"on", "开", "开启", "true", "1", "启用"}
 _OFF_VALUES = {"off", "关", "关闭", "false", "0", "禁用"}
 _FOLLOW_VALUES = {"默认", "跟随", "auto", "follow"}
 
-DEFAULT_WARN_MESSAGE = """检测到敏感词，消息已撤回并禁言处理。
+DEFAULT_WARN_MESSAGE = """检测到敏感词{recall_status}，已禁言处理。
 检测到的敏感词：{forbidden_words}
 违规次数：第{violation_count}次"""
 
@@ -152,7 +152,7 @@ DEFAULT_NOTIFY_MESSAGE = """🚨 敏感词警报
 违规次数：第{violation_count}次
 敏感词：{forbidden_words}
 原文：{original_text}
-处理：禁言{ban_duration}秒，消息已撤回
+处理：禁言{ban_duration}秒{recall_status}
 时间：{timestamp}"""
 
 
@@ -454,6 +454,8 @@ class SensitiveFilterPlugin(Star):
                 hit_word, source = await self._check_text(event, umo, text)
             if not hit_word and self._get_effective(umo, "image_enabled", False):
                 hit_word, source = await self._check_images(event, umo)
+                if hit_word:
+                    detected_text = "图片消息（已识别到违禁内容）"
             if not hit_word:
                 hit_word, source, forward_text = await self._check_qq_forward_messages(
                     event, umo
@@ -1008,7 +1010,9 @@ class SensitiveFilterPlugin(Star):
         mute_executed = False
 
         if self._get_effective(umo, "recall_enabled", True):
-            await self._try_recall(event)
+            recall_executed = await self._try_recall(event)
+        else:
+            recall_executed = False
 
         if self._get_effective(umo, "mute_enabled", False):
             if mute_duration > 0:
@@ -1030,6 +1034,7 @@ class SensitiveFilterPlugin(Star):
             violation_count=violation_count,
             ban_duration=mute_duration if mute_executed else 0,
             source=source,
+            recall_executed=recall_executed,
         )
 
         if self._get_effective(umo, "warn_enabled", True):
@@ -1074,23 +1079,26 @@ class SensitiveFilterPlugin(Star):
         violation_count: int,
         ban_duration: int,
         source: Any,
+        recall_executed: bool = False,
     ) -> dict[str, str]:
         original = str(original_text or "")
         forbidden_words = str(hit_word or "")
+        recall_status = "，消息已撤回" if recall_executed else ""
         return {
-            "group_id": str(group_id),
-            "user_name": str(sender_name),
-            "user_id": str(sender_id),
+            "group_id": str(group_id or ""),
+            "user_name": str(sender_name or ""),
+            "user_id": str(sender_id or ""),
             "forbidden_words": forbidden_words,
             "original_text": original,
             "masked_text": self._mask_text(original, forbidden_words),
             "violation_count": str(violation_count),
             "ban_duration": str(max(int(ban_duration or 0), 0)),
+            "source": str(source or ""),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             # 兼容旧模板变量，便于已有用户平滑升级。
-            "sender": str(sender_name),
+            "sender": str(sender_name or ""),
             "word": forbidden_words,
-            "source": str(source),
+            "recall_status": recall_status,
         }
 
     def _render_template(self, template: str, values: dict[str, str]) -> str:

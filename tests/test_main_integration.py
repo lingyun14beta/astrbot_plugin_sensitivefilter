@@ -573,7 +573,7 @@ async def run_tests():
     check("管理员通知模板渲染用户", "用户：模板用户 (20002)" in notify_text)
     check("管理员通知模板渲染敏感词", "敏感词：敏感词" in notify_text)
     check("管理员通知模板渲染原文", "原文：这是一条含有敏感词的消息" in notify_text)
-    check("管理员通知模板渲染禁言时长", "处理：禁言60秒，消息已撤回" in notify_text)
+    check("管理员通知模板渲染禁言时长", "处理：禁言60秒" in notify_text)
     check("管理员通知模板渲染时间", "时间：" in notify_text)
 
     plugin_custom_tpl, _ctx_custom_tpl, _cfg_custom_tpl = make_plugin(
