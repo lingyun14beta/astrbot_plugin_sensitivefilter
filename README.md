@@ -123,12 +123,12 @@ astrbot_plugin_sensitivefilter/
 群内警告文案模板默认如下，可在 WebUI 自行编辑：
 
 ```text
-检测到敏感词，消息已撤回并禁言处理。
+检测到敏感词{recall_status}，已禁言处理。
 检测到的敏感词：{forbidden_words}
 违规次数：第{violation_count}次
 ```
 
-群内警告模板可用变量：`{forbidden_words}`、`{original_text}`、`{masked_text}`、`{violation_count}`。
+群内警告模板可用变量：`{forbidden_words}`、`{original_text}`、`{masked_text}`、`{violation_count}`、`{recall_status}`。
 
 管理员私聊/管理群提醒模板默认如下，也可在 WebUI 自行编辑：
 
@@ -139,11 +139,11 @@ astrbot_plugin_sensitivefilter/
 违规次数：第{violation_count}次
 敏感词：{forbidden_words}
 原文：{original_text}
-处理：禁言{ban_duration}秒，消息已撤回
+处理：禁言{ban_duration}秒{recall_status}
 时间：{timestamp}
 ```
 
-管理员提醒模板可用变量：`{group_id}`、`{user_name}`、`{user_id}`、`{forbidden_words}`、`{original_text}`、`{violation_count}`、`{ban_duration}`、`{timestamp}`。另外保留 `{masked_text}` 作为脱敏文本变量。旧版 `{sender}`、`{word}`、`{source}` 变量仍兼容。
+管理员提醒模板可用变量：`{group_id}`、`{user_name}`、`{user_id}`、`{forbidden_words}`、`{original_text}`、`{violation_count}`、`{ban_duration}`、`{timestamp}`、`{recall_status}`。另外保留 `{masked_text}` 作为脱敏文本变量。旧版 `{sender}`、`{word}`、`{source}` 变量仍兼容。
 
 AI 审核 Prompt 模板必须包含 `{text}` 占位符（用于插入待审核的消息原文）；图片审核 Prompt 模板不需要 `{text}` 占位符（图片本身通过 `image_urls` 参数单独传给模型，不嵌入 Prompt 文本里）。
 
