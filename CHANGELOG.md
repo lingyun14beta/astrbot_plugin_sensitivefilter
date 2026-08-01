@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.3]
+
+### Changed
+
+- 新增 `pyproject.toml`，配置 ruff 对 `tests/*.py` 忽略 E402（测试文件为 stub AstrBot 需在 import 前插入路径，属刻意写法），并同步调整 CI 中锁定的 ruff 版本为 0.15.22。
+
 ## [1.2.2]
 
 ### Changed
