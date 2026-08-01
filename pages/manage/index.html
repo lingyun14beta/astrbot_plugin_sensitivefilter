@@ -37,6 +37,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 13h4v8H3zM10 9h4v12h-4zM17 5h4v16h-4z"/></svg>
           总览
         </button>
+        <button class="tab" data-tab="settings" type="button" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg>
+          全局设置
+        </button>
         <button class="tab" data-tab="words" type="button" role="tab">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41L11 3.83A2 2 0 0 0 9.59 3.24H4a1 1 0 0 0-1 1v5.59a2 2 0 0 0 .59 1.41l9.58 9.59a2 2 0 0 0 2.83 0l4.59-4.59a2 2 0 0 0 0-2.83z"/><circle cx="7.5" cy="7.5" r=".5"/></svg>
           全局词库
@@ -73,6 +77,11 @@
               <div id="overview-batch" class="kv-list"></div>
             </div>
           </div>
+        </section>
+
+        <!-- 全局设置 -->
+        <section id="panel-settings" class="panel" role="tabpanel">
+          <div id="settings-sections"></div>
         </section>
 
         <!-- 全局词库 -->

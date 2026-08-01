@@ -157,6 +157,7 @@ function makeChip(text, { highlight = "", onRemove } = {}) {
 
 const LOADERS = {
   overview: loadOverview,
+  settings: loadSettings,
   words: loadWords,
   groups: loadGroups,
   lists: loadLists,
@@ -244,6 +245,143 @@ async function loadOverview() {
     }
     batch.appendChild(row);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 全局设置
+// ---------------------------------------------------------------------------
+
+async function loadSettings() {
+  const data = await callApi(() => bridge.apiGet("page/settings"));
+  const container = el("settings-sections");
+  container.innerHTML = "";
+  for (const section of data.sections) {
+    container.appendChild(buildSettingsSection(section));
+  }
+}
+
+function buildSettingsSection(section) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const head = document.createElement("div");
+  head.className = "card-head";
+  const title = document.createElement("h2");
+  title.textContent = section.title;
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "btn primary sm";
+  saveBtn.type = "button";
+  saveBtn.textContent = "保存本组";
+  head.appendChild(title);
+  head.appendChild(saveBtn);
+  card.appendChild(head);
+
+  const fieldsWrap = document.createElement("div");
+  fieldsWrap.className = "fields";
+  const readers = {};
+  for (const field of section.fields) {
+    const { node, read } = buildSettingField(field);
+    readers[field.key] = read;
+    fieldsWrap.appendChild(node);
+  }
+  card.appendChild(fieldsWrap);
+
+  saveBtn.addEventListener("click", async () => {
+    const values = {};
+    for (const [key, read] of Object.entries(readers)) {
+      values[key] = read();
+    }
+    saveBtn.disabled = true;
+    try {
+      const res = await callApi(() =>
+        bridge.apiPost("page/settings/save", { values }),
+      );
+      toast(`已保存 ${res.saved.length} 项「${section.title}」配置`);
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  return card;
+}
+
+function buildSettingField(field) {
+  const wrap = document.createElement("div");
+  wrap.className = field.type === "bool" ? "field field-bool" : "field";
+
+  const labelText = document.createElement("span");
+  labelText.className = "field-label";
+  labelText.textContent = field.label;
+
+  let read;
+  if (field.type === "bool") {
+    const label = document.createElement("label");
+    label.className = "switch";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(field.value);
+    const slider = document.createElement("span");
+    slider.className = "slider";
+    label.appendChild(input);
+    label.appendChild(slider);
+    wrap.appendChild(labelText);
+    wrap.appendChild(label);
+    read = () => input.checked;
+  } else {
+    wrap.appendChild(labelText);
+    let control;
+    if (field.type === "int" || field.type === "float") {
+      control = document.createElement("input");
+      control.type = "number";
+      if (field.min !== undefined) control.min = field.min;
+      if (field.max !== undefined) control.max = field.max;
+      control.step = field.type === "float" ? "0.5" : "1";
+      control.value = field.value ?? 0;
+      read = () =>
+        field.type === "float"
+          ? parseFloat(control.value)
+          : parseInt(control.value, 10);
+    } else if (field.type === "select") {
+      control = document.createElement("select");
+      for (const opt of field.options || []) {
+        const option = document.createElement("option");
+        option.value = opt;
+        option.textContent = opt;
+        control.appendChild(option);
+      }
+      control.value = field.value;
+      read = () => control.value;
+    } else if (field.type === "text" || field.type === "list") {
+      control = document.createElement("textarea");
+      control.rows = field.key.endsWith("_prompt") ? 8 : 4;
+      control.value =
+        field.type === "list"
+          ? (field.value || []).join("\n")
+          : field.value || "";
+      control.placeholder = field.hint || "";
+      read = () =>
+        field.type === "list"
+          ? control.value
+              .split("\n")
+              .map((v) => v.trim())
+              .filter(Boolean)
+          : control.value;
+    } else {
+      control = document.createElement("input");
+      control.type = "text";
+      control.value = field.value ?? "";
+      read = () => control.value;
+    }
+    wrap.appendChild(control);
+    if (field.hint && field.type !== "text" && field.type !== "list") {
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = field.hint;
+      wrap.appendChild(hint);
+    }
+  }
+
+  return { node: wrap, read };
 }
 
 // ---------------------------------------------------------------------------

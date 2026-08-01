@@ -788,6 +788,53 @@ mark {
 }
 
 /* ============================================================
+   全局设置表单
+   ============================================================ */
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-bool {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.field-label {
+  font-size: 13px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.field input[type="number"] {
+  width: 100%;
+  padding: 9px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.field input[type="number"]:focus {
+  border-color: var(--primary);
+  box-shadow: var(--ring);
+}
+
+/* ============================================================
    命中测试
    ============================================================ */
 .test-result {

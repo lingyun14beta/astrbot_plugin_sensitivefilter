@@ -291,7 +291,7 @@ async def main():
         # ----------------------------------------------------
         routes = context.registered_routes
         check("web stub 生效（_WEB_API_AVAILABLE=True）", main_mod._WEB_API_AVAILABLE)
-        check("共注册 10 条页面 API 路由", len(routes) == 10)
+        check("共注册 12 条页面 API 路由", len(routes) == 12)
         check(
             "所有路由都带 /{插件名}/page 前缀",
             all(
@@ -518,6 +518,100 @@ async def main():
             "test 命中全局词库（与配置同源）",
             resp.body["hit"] and resp.body["source"] == "全局词库",
         )
+
+        # ----------------------------------------------------
+        # 7. 全局设置
+        # ----------------------------------------------------
+        resp = await plugin.page_get_settings()
+        section_ids = [s["id"] for s in resp.body["sections"]]
+        check(
+            "settings 返回 5 个分组且顺序固定",
+            section_ids
+            == ["basic", "actions", "api_detection", "llm_detection", "image_detection"],
+        )
+        basic_fields = {f["key"]: f for f in resp.body["sections"][0]["fields"]}
+        check(
+            "settings 字段值与配置同源",
+            basic_fields["enabled"]["value"] is True
+            and basic_fields["enabled"]["type"] == "bool",
+        )
+        actions_fields = {f["key"]: f for f in resp.body["sections"][1]["fields"]}
+        check(
+            "settings 数值字段带范围元信息",
+            actions_fields["mute_reset_hour"]["min"] == 0
+            and actions_fields["mute_reset_hour"]["max"] == 23,
+        )
+
+        # 配置被手工改坏（列表写成了字符串）时 GET 兜底为默认空列表
+        set_cfg(config, "notify_umos", "被改坏的脏数据")
+        resp = await plugin.page_get_settings()
+        broken = {
+            f["key"]: f for f in resp.body["sections"][1]["fields"]
+        }["notify_umos"]
+        check("settings GET 对脏 list 配置兜底纠偏", broken["value"] == [])
+        set_cfg(config, "notify_umos", [])
+
+        fake_request.payload = {
+            "values": {"warn_enabled": False, "mute_reset_hour": 4}
+        }
+        resp = await plugin.page_save_settings()
+        check(
+            "settings/save 合法保存",
+            not resp.error
+            and resp.body["saved"] == ["mute_reset_hour", "warn_enabled"]
+            and plugin._cfg("warn_enabled") is False
+            and plugin._cfg("mute_reset_hour") == 4,
+        )
+
+        fake_request.payload = {"values": {"mute_reset_hour": 25}}
+        resp = await plugin.page_save_settings()
+        check("settings/save 超出范围拒绝", resp.error)
+
+        fake_request.payload = {"values": {"enabled": "yes"}}
+        resp = await plugin.page_save_settings()
+        check("settings/save 类型错误拒绝", resp.error)
+
+        fake_request.payload = {"values": {"不存在的配置": True}}
+        resp = await plugin.page_save_settings()
+        check("settings/save 未知配置项拒绝", resp.error)
+
+        # 原子性：混合合法+非法时整体不落盘
+        set_cfg(config, "enabled", True)
+        fake_request.payload = {"values": {"enabled": False, "mute_reset_hour": 99}}
+        resp = await plugin.page_save_settings()
+        check(
+            "settings/save 混合非法值时原子拒绝",
+            resp.error and plugin._cfg("enabled") is True,
+        )
+
+        # list 类型清洗
+        fake_request.payload = {"values": {"notify_umos": [" a ", "", "b"]}}
+        resp = await plugin.page_save_settings()
+        check(
+            "settings/save list 清洗空白项",
+            not resp.error and plugin._cfg("notify_umos") == ["a", "b"],
+        )
+
+        # select 非法选项
+        fake_request.payload = {"values": {"api_provider": "别的接口"}}
+        resp = await plugin.page_save_settings()
+        check("settings/save select 非法选项拒绝", resp.error)
+
+        # 匹配行为开关变化触发 Trie 重建 + 群 Trie 缓存清空
+        plugin._group_tries["x"] = "占位缓存"
+        old_fuzzy = plugin.global_trie.fuzzy
+        fake_request.payload = {"values": {"fuzzy_match": not old_fuzzy}}
+        resp = await plugin.page_save_settings()
+        check(
+            "settings/save 修改模糊匹配后 Trie 重建",
+            not resp.error
+            and plugin.global_trie.fuzzy is (not old_fuzzy)
+            and not plugin._group_tries,
+        )
+
+        fake_request.payload = {"values": {}}
+        resp = await plugin.page_save_settings()
+        check("settings/save 空 values 拒绝", resp.error)
     finally:
         fake_request.payload = None
         await plugin.terminate()

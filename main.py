@@ -161,6 +161,211 @@ _ACCESS_LIST_MAP = {
     "user": ("user_whitelist_enabled", "user_whitelist_ids"),
 }
 
+# Web 管理页「全局设置」可编辑的配置项规格。
+# 只收录适合在页面上直接编辑的项（全局词库/分群配置/名单有各自专门的标签页）。
+# type 决定前端渲染的控件和后端校验规则；default 仅用于配置缺失时的展示。
+_PAGE_SETTING_SPEC: dict[str, dict] = {
+    # ---- 基础设置 ----
+    "enabled": {"type": "bool", "label": "插件总开关", "default": True},
+    "local_enabled": {
+        "type": "bool",
+        "label": "本地词库检测（全局默认）",
+        "default": True,
+    },
+    "case_insensitive": {"type": "bool", "label": "忽略大小写", "default": True},
+    "fuzzy_match": {
+        "type": "bool",
+        "label": "模糊匹配（防拆字绕过）",
+        "default": True,
+    },
+    "stop_event_on_hit": {
+        "type": "bool",
+        "label": "命中后阻止事件继续传播",
+        "default": True,
+    },
+    "qq_forward_debug": {
+        "type": "bool",
+        "label": "QQ 合并转发调试模式",
+        "default": False,
+    },
+    # ---- 处理动作默认值 ----
+    "recall_enabled": {"type": "bool", "label": "命中后撤回消息", "default": True},
+    "warn_enabled": {"type": "bool", "label": "命中后群内警告", "default": True},
+    "warn_message": {
+        "type": "text",
+        "label": "群内警告文案模板",
+        "hint": "支持 {forbidden_words} {original_text} {masked_text} {violation_count} 等变量；留空使用内置默认模板",
+        "default": "",
+    },
+    "notify_enabled": {"type": "bool", "label": "命中后转发通知", "default": False},
+    "notify_umos": {
+        "type": "list",
+        "label": "通知接收会话列表",
+        "hint": "每行一个 umo，如 aiocqhttp:GroupMessage:123456",
+        "default": [],
+    },
+    "notify_message": {
+        "type": "text",
+        "label": "通知文案模板",
+        "hint": "支持 {group_id} {user_name} {user_id} {forbidden_words} {violation_count} {ban_duration} {timestamp} 等变量；留空使用内置默认模板",
+        "default": "",
+    },
+    "mute_enabled": {"type": "bool", "label": "命中后自动禁言", "default": False},
+    "mute_first_duration_seconds": {
+        "type": "int",
+        "label": "首次违规禁言时长（秒）",
+        "min": 0,
+        "max": 86400,
+        "default": 60,
+    },
+    "mute_second_duration_seconds": {
+        "type": "int",
+        "label": "第二次违规禁言时长（秒）",
+        "min": 0,
+        "max": 86400,
+        "default": 300,
+    },
+    "mute_third_duration_seconds": {
+        "type": "int",
+        "label": "第三次及以上禁言时长（秒）",
+        "min": 0,
+        "max": 2592000,
+        "default": 86400,
+    },
+    "mute_reset_hour": {
+        "type": "int",
+        "label": "违规次数重置时间（小时，0-23）",
+        "min": 0,
+        "max": 23,
+        "default": 0,
+    },
+    # ---- 外部接口检测 ----
+    "api_enabled": {
+        "type": "bool",
+        "label": "启用外部接口检测（全局默认）",
+        "default": False,
+    },
+    "api_provider": {
+        "type": "select",
+        "label": "外部接口类型",
+        "options": ["uapis_profanitycheck", "generic"],
+        "default": "uapis_profanitycheck",
+    },
+    "api_url": {
+        "type": "str",
+        "label": "检测接口地址",
+        "default": UAPIS_PROFANITYCHECK_URL,
+    },
+    "api_key": {
+        "type": "str",
+        "label": "uapis.cn 接口密钥（可选）",
+        "default": "",
+    },
+    "api_method": {
+        "type": "select",
+        "label": "请求方式（仅 generic）",
+        "options": ["POST", "GET"],
+        "default": "POST",
+    },
+    "api_headers": {
+        "type": "text",
+        "label": "自定义请求头 JSON（仅 generic）",
+        "default": "{}",
+    },
+    "api_text_field": {
+        "type": "str",
+        "label": "文本字段名（仅 generic）",
+        "default": "text",
+    },
+    "api_hit_path": {
+        "type": "str",
+        "label": "“是否命中”字段路径（仅 generic）",
+        "default": "hit",
+    },
+    "api_reason_path": {
+        "type": "str",
+        "label": "“命中原因”字段路径（仅 generic）",
+        "default": "reason",
+    },
+    "api_timeout": {
+        "type": "float",
+        "label": "接口请求超时（秒）",
+        "min": 1,
+        "max": 30,
+        "default": 5.0,
+    },
+    # ---- AI 语义检测 ----
+    "llm_enabled": {
+        "type": "bool",
+        "label": "启用 AI 语义检测（全局默认）",
+        "default": False,
+    },
+    "llm_provider_id": {
+        "type": "str",
+        "label": "审核模型 Provider ID",
+        "hint": "留空则使用当前会话默认 Provider",
+        "default": "",
+    },
+    "llm_prompt": {
+        "type": "text",
+        "label": "AI 审核提示词模板",
+        "hint": "必须包含 {text} 占位符；留空使用内置默认模板",
+        "default": "",
+    },
+    "llm_batch_enabled": {
+        "type": "bool",
+        "label": "批量审核（降低调用成本）",
+        "default": False,
+    },
+    "llm_batch_size": {
+        "type": "int",
+        "label": "批量大小",
+        "min": 2,
+        "max": 50,
+        "default": 10,
+    },
+    "llm_batch_max_wait_minutes": {
+        "type": "int",
+        "label": "兜底等待时间（分钟）",
+        "min": 1,
+        "max": 120,
+        "default": 30,
+    },
+    "llm_batch_prompt": {
+        "type": "text",
+        "label": "批量审核提示词模板",
+        "hint": "必须包含 {messages} 占位符；留空使用内置默认模板",
+        "default": "",
+    },
+    # ---- 图片检测 ----
+    "image_enabled": {
+        "type": "bool",
+        "label": "启用图片检测（全局默认）",
+        "default": False,
+    },
+    "image_provider_id": {
+        "type": "str",
+        "label": "图片审核 Provider ID",
+        "hint": "必须选择支持视觉的 Provider；留空则不执行图片检测",
+        "default": "",
+    },
+    "image_prompt": {
+        "type": "text",
+        "label": "图片审核提示词模板",
+        "hint": "留空使用内置默认模板",
+        "default": "",
+    },
+}
+
+# 「全局设置」页分组的展示顺序与标题（key 是 _conf_schema.json 里的分组名）
+_PAGE_SETTING_SECTIONS = (
+    ("basic", "基础设置"),
+    ("actions", "处理动作默认值"),
+    ("api_detection", "外部接口检测"),
+    ("llm_detection", "AI 语义检测"),
+    ("image_detection", "图片检测"),
+)
+
 DEFAULT_WARN_MESSAGE = """检测到敏感词{recall_status}，已禁言处理。
 检测到的敏感词：{forbidden_words}
 违规次数：第{violation_count}次"""
@@ -1708,6 +1913,15 @@ class SensitiveFilterPlugin(Star):
             f"{prefix}/lists/save", self.page_save_access_list, ["POST"], "保存名单配置"
         )
         register(f"{prefix}/test", self.page_test_text, ["POST"], "本地词库命中测试")
+        register(
+            f"{prefix}/settings", self.page_get_settings, ["GET"], "获取全局设置"
+        )
+        register(
+            f"{prefix}/settings/save",
+            self.page_save_settings,
+            ["POST"],
+            "保存全局设置",
+        )
 
     async def page_overview(self):
         batch_queues = {
@@ -1938,3 +2152,110 @@ class SensitiveFilterPlugin(Star):
                         }
                     )
         return json_response({"hit": False, "normalized": norm_text})
+
+    # ------------------------------------------------------------------
+    # 全局设置（基础设置 / 处理动作 / 外部接口 / AI 语义 / 图片检测）
+    # ------------------------------------------------------------------
+
+    async def page_get_settings(self):
+        sections = []
+        for section_id, title in _PAGE_SETTING_SECTIONS:
+            fields = []
+            for key, spec in _PAGE_SETTING_SPEC.items():
+                if _KEY_TO_SECTION.get(key) != section_id:
+                    continue
+                value = self._cfg(key, spec.get("default"))
+                # 配置文件可能被手工改坏（比如把列表写成了字符串），
+                # 这里兜底纠正，避免前端 .join 等方法直接崩掉
+                if spec["type"] == "list" and not isinstance(value, list):
+                    value = list(spec.get("default") or [])
+                field = {
+                    "key": key,
+                    "type": spec["type"],
+                    "label": spec["label"],
+                    "value": value,
+                }
+                for opt in ("min", "max", "options", "hint"):
+                    if opt in spec:
+                        field[opt] = spec[opt]
+                fields.append(field)
+            sections.append({"id": section_id, "title": title, "fields": fields})
+        return json_response({"sections": sections})
+
+    @staticmethod
+    def _validate_page_setting(spec: dict, value: Any) -> tuple[bool, Any]:
+        """按 _PAGE_SETTING_SPEC 校验并清洗一个配置值。
+
+        返回 (是否通过, 清洗后的值或错误消息)。
+        """
+        spec_type = spec["type"]
+        if spec_type == "bool":
+            if isinstance(value, bool):
+                return True, value
+            return False, "必须是布尔值"
+        if spec_type == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                return False, "必须是整数"
+            if value < spec.get("min", -2**63) or value > spec.get("max", 2**63):
+                return False, f"必须在 {spec.get('min')} ~ {spec.get('max')} 之间"
+            return True, value
+        if spec_type == "float":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False, "必须是数字"
+            value = float(value)
+            if value < spec.get("min", float("-inf")) or value > spec.get(
+                "max", float("inf")
+            ):
+                return False, f"必须在 {spec.get('min')} ~ {spec.get('max')} 之间"
+            return True, value
+        if spec_type in ("str", "text"):
+            if isinstance(value, str):
+                return True, value
+            return False, "必须是字符串"
+        if spec_type == "list":
+            if not isinstance(value, list):
+                return False, "必须是字符串数组"
+            return True, [str(v).strip() for v in value if str(v).strip()]
+        if spec_type == "select":
+            if value in spec.get("options", []):
+                return True, value
+            return False, f"必须是 {'/'.join(spec.get('options', []))} 之一"
+        return False, f"未知的配置类型 {spec_type}"
+
+    async def page_save_settings(self):
+        payload = await request.json(default={})
+        values = payload.get("values")
+        if not isinstance(values, dict) or not values:
+            return error_response("values 必须是非空对象")
+
+        # 先全部校验，有任何一项不通过就整体不落盘，保证一次保存是原子的
+        cleaned: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for key, value in values.items():
+            spec = _PAGE_SETTING_SPEC.get(key)
+            if spec is None:
+                errors[key] = "不支持的配置项"
+                continue
+            ok, result = self._validate_page_setting(spec, value)
+            if ok:
+                cleaned[key] = result
+            else:
+                errors[key] = result
+        if errors:
+            message = "；".join(f"{key}: {msg}" for key, msg in errors.items())
+            return error_response(f"校验失败：{message}", data={"errors": errors})
+
+        for key, value in cleaned.items():
+            section = _KEY_TO_SECTION.get(key)
+            if section is None:
+                self.config[key] = value
+            else:
+                self.config.setdefault(section, {})[key] = value
+        self.config.save_config()
+
+        # 匹配行为相关的开关变化后，全局 Trie 和各群 Trie 缓存都要重建
+        if any(k in cleaned for k in ("case_insensitive", "fuzzy_match")):
+            self._rebuild_global_trie()
+            self._group_tries.clear()
+
+        return json_response({"saved": sorted(cleaned.keys())})
