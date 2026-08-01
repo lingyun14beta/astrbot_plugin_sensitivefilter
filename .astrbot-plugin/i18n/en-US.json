@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "manage": {
+      "title": "Sensitive Filter",
+      "description": "Manage the global word list, per-group overrides, whitelists/blacklists, and test text matching."
+    }
+  }
+}

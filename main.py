@@ -42,6 +42,18 @@ from .llm_checker import (
 )
 from .word_matcher import WordTrie, normalize_text
 
+PLUGIN_NAME = "astrbot_plugin_sensitivefilter"
+
+# 插件 Web 管理页（Pages）依赖较新版本 AstrBot 提供的 astrbot.api.web；
+# 旧版本没有该模块时静默降级，只影响 Web 管理页，不影响插件其余功能。
+try:
+    from astrbot.api.web import error_response, json_response, request
+
+    _WEB_API_AVAILABLE = True
+except ImportError:  # pragma: no cover - 取决于运行环境的 AstrBot 版本
+    error_response = json_response = request = None  # type: ignore[assignment]
+    _WEB_API_AVAILABLE = False
+
 # 群配置中支持“跟随全局 / 单独覆盖”的布尔类开关
 _OVERRIDABLE_BOOL_KEYS = (
     "enabled",
@@ -142,6 +154,13 @@ _ON_VALUES = {"on", "开", "开启", "true", "1", "启用"}
 _OFF_VALUES = {"off", "关", "关闭", "false", "0", "禁用"}
 _FOLLOW_VALUES = {"默认", "跟随", "auto", "follow"}
 
+# Web 管理页名单管理接口支持的名单类型 -> (启用开关 key, 列表 key)
+_ACCESS_LIST_MAP = {
+    "whitelist": ("whitelist_enabled", "whitelist_umos"),
+    "blacklist": ("blacklist_enabled", "blacklist_umos"),
+    "user": ("user_whitelist_enabled", "user_whitelist_ids"),
+}
+
 DEFAULT_WARN_MESSAGE = """检测到敏感词{recall_status}，已禁言处理。
 检测到的敏感词：{forbidden_words}
 违规次数：第{violation_count}次"""
@@ -188,6 +207,9 @@ class SensitiveFilterPlugin(Star):
                 "[敏感词过滤] 创建批量审核定时任务失败（没有运行中的事件循环），"
                 "批量审核的兜底超时机制将不可用，但按数量触发的批量逻辑仍正常工作"
             )
+
+        # 注册 Web 管理页（pages/manage/）使用的后端 API；旧版本 AstrBot 上自动跳过
+        self._register_web_apis()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -1648,3 +1670,271 @@ class SensitiveFilterPlugin(Star):
             yield event.plain_result(
                 f"批量审核调用失败：{summary['total']} 条消息未完成审核，请查看日志"
             )
+
+    # ------------------------------------------------------------------
+    # Web 管理页（Pages）后端 API
+    #
+    # 供 pages/manage/ 下的插件页面通过 window.AstrBotPluginPage bridge 调用。
+    # bridge 端 endpoint 不带插件名前缀（如 "page/words"），Dashboard 会转发到
+    # /api/v1/plugins/extensions/astrbot_plugin_sensitivefilter/page/words，
+    # 因此这里注册的路由都带插件名前缀。
+    # ------------------------------------------------------------------
+
+    def _register_web_apis(self) -> None:
+        if not _WEB_API_AVAILABLE:
+            return
+        register = getattr(self.context, "register_web_api", None)
+        if not callable(register):
+            logger.info(
+                "[敏感词过滤] 当前 AstrBot 版本不支持插件 Pages，Web 管理页不可用"
+            )
+            return
+        prefix = f"/{PLUGIN_NAME}/page"
+        register(f"{prefix}/overview", self.page_overview, ["GET"], "管理页总览数据")
+        register(f"{prefix}/words", self.page_list_words, ["GET"], "获取全局词库")
+        register(f"{prefix}/words/add", self.page_add_words, ["POST"], "添加全局敏感词")
+        register(
+            f"{prefix}/words/delete", self.page_delete_word, ["POST"], "删除全局敏感词"
+        )
+        register(f"{prefix}/groups", self.page_list_groups, ["GET"], "获取分群配置")
+        register(f"{prefix}/groups/save", self.page_save_group, ["POST"], "保存分群配置")
+        register(
+            f"{prefix}/groups/delete", self.page_delete_group, ["POST"], "删除分群配置"
+        )
+        register(
+            f"{prefix}/lists", self.page_list_access_lists, ["GET"], "获取名单配置"
+        )
+        register(
+            f"{prefix}/lists/save", self.page_save_access_list, ["POST"], "保存名单配置"
+        )
+        register(f"{prefix}/test", self.page_test_text, ["POST"], "本地词库命中测试")
+
+    async def page_overview(self):
+        batch_queues = {
+            umo: len(bucket) for umo, bucket in self._llm_batches.items() if bucket
+        }
+        try:
+            batch_size = int(self._cfg("llm_batch_size", 10) or 10)
+        except (TypeError, ValueError):
+            batch_size = 10
+        try:
+            batch_max_wait = float(self._cfg("llm_batch_max_wait_minutes", 30) or 30)
+        except (TypeError, ValueError):
+            batch_max_wait = 30
+        return json_response(
+            {
+                "global": {
+                    "enabled": bool(self._cfg("enabled", True)),
+                    "local_enabled": bool(self._cfg("local_enabled", True)),
+                    "api_enabled": bool(self._cfg("api_enabled", False)),
+                    "llm_enabled": bool(self._cfg("llm_enabled", False)),
+                    "image_enabled": bool(self._cfg("image_enabled", False)),
+                    "recall_enabled": bool(self._cfg("recall_enabled", True)),
+                    "warn_enabled": bool(self._cfg("warn_enabled", True)),
+                    "notify_enabled": bool(self._cfg("notify_enabled", False)),
+                    "mute_enabled": bool(self._cfg("mute_enabled", False)),
+                    "case_insensitive": bool(self._cfg("case_insensitive", True)),
+                    "fuzzy_match": bool(self._cfg("fuzzy_match", True)),
+                },
+                "counts": {
+                    "words": len(self._cfg("words", []) or []),
+                    "groups": len(self._get_group_overrides()),
+                    "whitelist": len(self._cfg("whitelist_umos", []) or []),
+                    "blacklist": len(self._cfg("blacklist_umos", []) or []),
+                    "user_whitelist": len(self._cfg("user_whitelist_ids", []) or []),
+                    "violation_records": len(self._violation_counts),
+                },
+                "access": {
+                    "whitelist_enabled": bool(self._cfg("whitelist_enabled", False)),
+                    "blacklist_enabled": bool(self._cfg("blacklist_enabled", False)),
+                    "user_whitelist_enabled": bool(
+                        self._cfg("user_whitelist_enabled", True)
+                    ),
+                },
+                "batch": {
+                    "enabled": bool(self._cfg("llm_batch_enabled", False)),
+                    "size": batch_size,
+                    "max_wait_minutes": batch_max_wait,
+                    "queues": batch_queues,
+                },
+            }
+        )
+
+    async def page_list_words(self):
+        return json_response({"words": list(self._cfg("words", []) or [])})
+
+    async def page_add_words(self):
+        payload = await request.json(default={})
+        raw = payload.get("words", payload.get("word", []))
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return error_response("words 必须是字符串数组")
+        words = list(self._cfg("words", []) or [])
+        added, skipped = [], []
+        for item in raw:
+            word = str(item or "").strip()
+            if not word:
+                continue
+            if word in words:
+                skipped.append(word)
+                continue
+            words.append(word)
+            added.append(word)
+        if not added:
+            return error_response("没有可添加的词（内容为空或全部已存在）")
+        self._set_cfg("words", words)
+        self._rebuild_global_trie()
+        return json_response(
+            {"added": added, "skipped": skipped, "total": len(words)}
+        )
+
+    async def page_delete_word(self):
+        payload = await request.json(default={})
+        word = str(payload.get("word") or "").strip()
+        words = list(self._cfg("words", []) or [])
+        if not word or word not in words:
+            return error_response(f"全局词库中没有找到「{word}」")
+        words.remove(word)
+        self._set_cfg("words", words)
+        self._rebuild_global_trie()
+        return json_response({"deleted": word, "total": len(words)})
+
+    async def page_list_groups(self):
+        groups = []
+        for item in self._get_group_overrides():
+            groups.append(
+                {
+                    "umo": str(item.get("umo", "")),
+                    "settings": {
+                        key: item.get(key, "跟随全局")
+                        for key in _OVERRIDABLE_BOOL_KEYS
+                    },
+                    "extra_words": list(item.get("extra_words") or []),
+                }
+            )
+        return json_response(
+            {
+                "groups": groups,
+                "switch_keys": list(_OVERRIDABLE_BOOL_KEYS),
+                "tristate_options": list(_TRISTATE_TO_BOOL.keys()),
+            }
+        )
+
+    async def page_save_group(self):
+        payload = await request.json(default={})
+        umo = str(payload.get("umo") or "").strip()
+        if not umo:
+            return error_response("umo 不能为空")
+        settings = payload.get("settings") or {}
+        if not isinstance(settings, dict):
+            return error_response("settings 必须是对象")
+        for key, value in settings.items():
+            if key not in _OVERRIDABLE_BOOL_KEYS:
+                return error_response(f"未知的设置项「{key}」")
+            if value not in _TRISTATE_TO_BOOL:
+                return error_response(
+                    f"设置项「{key}」的值必须是 跟随全局/开启/关闭 之一"
+                )
+        override = self._get_or_create_group_override(umo)
+        for key, value in settings.items():
+            override[key] = value
+        extra_words = payload.get("extra_words")
+        if extra_words is not None:
+            if not isinstance(extra_words, list):
+                return error_response("extra_words 必须是字符串数组")
+            override["extra_words"] = [
+                str(w).strip() for w in extra_words if str(w).strip()
+            ]
+        # 注意：这里不调用 _prune_group_override_if_empty。Web 页面上“新增/删除”
+        # 是显式操作，即使全部恢复“跟随全局”且没有专属词，条目也应保留在页面上，
+        # 由用户点“删除该配置”显式移除（自动清理只对群内指令路径生效）。
+        self.config.save_config()
+        self._invalidate_group_trie(umo)
+        return json_response({"saved": True, "umo": umo})
+
+    async def page_delete_group(self):
+        payload = await request.json(default={})
+        umo = str(payload.get("umo") or "").strip()
+        override = self._find_group_override(umo)
+        if override is None:
+            return error_response("该会话没有分群配置")
+        self._get_group_overrides().remove(override)
+        self.config.save_config()
+        self._invalidate_group_trie(umo)
+        return json_response({"deleted": umo})
+
+    async def page_list_access_lists(self):
+        result = {}
+        for name, (enabled_key, list_key) in _ACCESS_LIST_MAP.items():
+            result[name] = {
+                "enabled": bool(self._cfg(enabled_key, False)),
+                "items": list(self._cfg(list_key, []) or []),
+            }
+        return json_response(result)
+
+    async def page_save_access_list(self):
+        payload = await request.json(default={})
+        list_name = str(payload.get("list") or "")
+        keys = _ACCESS_LIST_MAP.get(list_name)
+        if keys is None:
+            return error_response("list 必须是 whitelist / blacklist / user 之一")
+        enabled_key, list_key = keys
+        if "enabled" in payload:
+            self._set_cfg(enabled_key, bool(payload["enabled"]))
+
+        added = removed = None
+        add_value = str(payload.get("add") or "").strip()
+        remove_value = str(payload.get("remove") or "").strip()
+        if add_value:
+            if list_name == "user":
+                added = self._add_to_user_whitelist(add_value)
+            else:
+                added = self._add_to_umo_list(list_key, add_value)
+        if remove_value:
+            if list_name == "user":
+                removed = self._remove_from_user_whitelist(remove_value)
+            else:
+                removed = self._remove_from_umo_list(list_key, remove_value)
+
+        return json_response(
+            {
+                "added": added,
+                "removed": removed,
+                "enabled": bool(self._cfg(enabled_key, False)),
+                "items": list(self._cfg(list_key, []) or []),
+            }
+        )
+
+    async def page_test_text(self):
+        payload = await request.json(default={})
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return error_response("text 不能为空")
+        umo = str(payload.get("umo") or "").strip()
+        norm_text = normalize_text(text)
+
+        hit = self.global_trie.find_first(norm_text)
+        if hit:
+            return json_response(
+                {
+                    "hit": True,
+                    "word": hit,
+                    "source": "全局词库",
+                    "normalized": norm_text,
+                }
+            )
+        if umo:
+            group_trie = self._get_group_trie(umo)
+            if group_trie:
+                hit = group_trie.find_first(norm_text)
+                if hit:
+                    return json_response(
+                        {
+                            "hit": True,
+                            "word": hit,
+                            "source": "本群专属词库",
+                            "normalized": norm_text,
+                        }
+                    )
+        return json_response({"hit": False, "normalized": norm_text})
