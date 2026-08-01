@@ -295,8 +295,7 @@ async def main():
         check(
             "所有路由都带 /{插件名}/page 前缀",
             all(
-                r[0].startswith("/astrbot_plugin_sensitivefilter/page/")
-                for r in routes
+                r[0].startswith("/astrbot_plugin_sensitivefilter/page/") for r in routes
             ),
         )
         check(
@@ -347,7 +346,10 @@ async def main():
 
         fake_request.payload = {"word": "单个词"}
         resp = await plugin.page_add_words()
-        check("add 兼容单个 word 字段", not resp.error and resp.body["added"] == ["单个词"])
+        check(
+            "add 兼容单个 word 字段",
+            not resp.error and resp.body["added"] == ["单个词"],
+        )
 
         fake_request.payload = {"words": "单个字符串也接受"}
         resp = await plugin.page_add_words()
@@ -527,7 +529,13 @@ async def main():
         check(
             "settings 返回 5 个分组且顺序固定",
             section_ids
-            == ["basic", "actions", "api_detection", "llm_detection", "image_detection"],
+            == [
+                "basic",
+                "actions",
+                "api_detection",
+                "llm_detection",
+                "image_detection",
+            ],
         )
         basic_fields = {f["key"]: f for f in resp.body["sections"][0]["fields"]}
         check(
@@ -545,15 +553,13 @@ async def main():
         # 配置被手工改坏（列表写成了字符串）时 GET 兜底为默认空列表
         set_cfg(config, "notify_umos", "被改坏的脏数据")
         resp = await plugin.page_get_settings()
-        broken = {
-            f["key"]: f for f in resp.body["sections"][1]["fields"]
-        }["notify_umos"]
+        broken = {f["key"]: f for f in resp.body["sections"][1]["fields"]}[
+            "notify_umos"
+        ]
         check("settings GET 对脏 list 配置兜底纠偏", broken["value"] == [])
         set_cfg(config, "notify_umos", [])
 
-        fake_request.payload = {
-            "values": {"warn_enabled": False, "mute_reset_hour": 4}
-        }
+        fake_request.payload = {"values": {"warn_enabled": False, "mute_reset_hour": 4}}
         resp = await plugin.page_save_settings()
         check(
             "settings/save 合法保存",

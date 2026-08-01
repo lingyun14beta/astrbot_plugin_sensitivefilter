@@ -1902,7 +1902,9 @@ class SensitiveFilterPlugin(Star):
             f"{prefix}/words/delete", self.page_delete_word, ["POST"], "删除全局敏感词"
         )
         register(f"{prefix}/groups", self.page_list_groups, ["GET"], "获取分群配置")
-        register(f"{prefix}/groups/save", self.page_save_group, ["POST"], "保存分群配置")
+        register(
+            f"{prefix}/groups/save", self.page_save_group, ["POST"], "保存分群配置"
+        )
         register(
             f"{prefix}/groups/delete", self.page_delete_group, ["POST"], "删除分群配置"
         )
@@ -1913,9 +1915,7 @@ class SensitiveFilterPlugin(Star):
             f"{prefix}/lists/save", self.page_save_access_list, ["POST"], "保存名单配置"
         )
         register(f"{prefix}/test", self.page_test_text, ["POST"], "本地词库命中测试")
-        register(
-            f"{prefix}/settings", self.page_get_settings, ["GET"], "获取全局设置"
-        )
+        register(f"{prefix}/settings", self.page_get_settings, ["GET"], "获取全局设置")
         register(
             f"{prefix}/settings/save",
             self.page_save_settings,
@@ -1999,9 +1999,7 @@ class SensitiveFilterPlugin(Star):
             return error_response("没有可添加的词（内容为空或全部已存在）")
         self._set_cfg("words", words)
         self._rebuild_global_trie()
-        return json_response(
-            {"added": added, "skipped": skipped, "total": len(words)}
-        )
+        return json_response({"added": added, "skipped": skipped, "total": len(words)})
 
     async def page_delete_word(self):
         payload = await request.json(default={})
@@ -2021,8 +2019,7 @@ class SensitiveFilterPlugin(Star):
                 {
                     "umo": str(item.get("umo", "")),
                     "settings": {
-                        key: item.get(key, "跟随全局")
-                        for key in _OVERRIDABLE_BOOL_KEYS
+                        key: item.get(key, "跟随全局") for key in _OVERRIDABLE_BOOL_KEYS
                     },
                     "extra_words": list(item.get("extra_words") or []),
                 }
@@ -2196,7 +2193,7 @@ class SensitiveFilterPlugin(Star):
         if spec_type == "int":
             if isinstance(value, bool) or not isinstance(value, int):
                 return False, "必须是整数"
-            if value < spec.get("min", -2**63) or value > spec.get("max", 2**63):
+            if value < spec.get("min", -(2**63)) or value > spec.get("max", 2**63):
                 return False, f"必须在 {spec.get('min')} ~ {spec.get('max')} 之间"
             return True, value
         if spec_type == "float":
