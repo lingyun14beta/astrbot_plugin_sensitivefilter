@@ -385,7 +385,9 @@ code {
   pointer-events: none;
 }
 
-.input-icon ~ input {
+/* 注意：必须比 input[type="text"] 的优先级高，否则左 padding 会被覆盖，
+   图标就会和文字重叠。 */
+.input-icon ~ input[type="text"] {
   padding-left: 34px;
 }
 
