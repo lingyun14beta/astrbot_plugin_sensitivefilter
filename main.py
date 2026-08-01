@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -40,6 +42,7 @@ from .llm_checker import (
     check_via_llm,
     check_via_llm_batch,
 )
+from .web import WebMixin
 from .word_matcher import WordTrie, normalize_text
 
 # 群配置中支持“跟随全局 / 单独覆盖”的布尔类开关
@@ -109,6 +112,7 @@ _KEY_TO_SECTION = {
 # 通过指令创建条目时，都必须在 __template_key 写入这个值，否则 WebUI 会提示
 # “找不到对应模板”。
 _GROUP_OVERRIDE_TEMPLATE_KEY = "group_override"
+_VIOLATION_RECORDS_FILENAME = "violation_records.json"
 _QQ_FORWARD_MAX_FETCHES = 20
 _QQ_FORWARD_MAX_FORWARD_DEPTH = 5
 _QQ_FORWARD_MAX_COMPONENT_DEPTH = 10
@@ -156,7 +160,7 @@ DEFAULT_NOTIFY_MESSAGE = """🚨 敏感词警报
 时间：{timestamp}"""
 
 
-class SensitiveFilterPlugin(Star):
+class SensitiveFilterPlugin(WebMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -177,7 +181,15 @@ class SensitiveFilterPlugin(Star):
         # 自动禁言违规计数：按 (umo, sender_id) 记录当前重置周期内的触发次数。
         # 计数只保存在内存中；AstrBot 重启/插件重载后会重新开始计数。
         self._violation_counts: dict[tuple[str, str], tuple[str, int]] = {}
+        # 额外插件页面使用的违规记录会持久化到 JSON 文件，不再做条数上限裁剪。
+        self._violation_records: list[dict[str, Any]] = []
+        self._next_violation_record_id = 1
+        self._load_violation_records()
         self._llm_batch_lock = asyncio.Lock()
+
+        # 注册额外插件页面（pages/dashboard）所需的 Bridge API；这不是
+        # _conf_schema.json 生成的设置 UI，而是 AstrBot 插件页里的独立面板。
+        self._register_web_apis()
         self._batch_ticker_task: asyncio.Task | None = None
         try:
             self._batch_ticker_task = asyncio.create_task(self._batch_ticker_loop())
@@ -490,20 +502,26 @@ class SensitiveFilterPlugin(Star):
         text = (event.message_str or "").strip()
 
         detected_text = text
+        hit_media_path: str | None = None
         try:
             hit_word = source = None
             if text:
                 hit_word, source = await self._check_text(event, umo, text)
             if not hit_word and self._get_effective(umo, "image_enabled", False):
-                hit_word, source = await self._check_images(event, umo)
-                if hit_word:
+                hit_word, source, hit_media_path = await self._check_images(event, umo)
+                if hit_media_path:
                     detected_text = "图片消息（已识别到违禁内容）"
             if not hit_word:
-                hit_word, source, forward_text = await self._check_qq_forward_messages(
-                    event, umo
-                )
-                if forward_text is not None:
-                    detected_text = forward_text
+                (
+                    hit_word,
+                    source,
+                    forward_payload,
+                    forward_media_path,
+                ) = await self._check_qq_forward_messages(event, umo)
+                if forward_payload is not None:
+                    detected_text = forward_payload
+                if forward_media_path is not None:
+                    hit_media_path = forward_media_path
         except Exception:  # noqa: BLE001
             logger.exception("[敏感词过滤] 检测过程中发生异常，本次跳过")
             return
@@ -519,7 +537,12 @@ class SensitiveFilterPlugin(Star):
 
         try:
             await self._handle_violation(
-                event, umo, hit_word, source, audited_text=detected_text
+                event,
+                umo,
+                hit_word,
+                source or "未知来源",
+                audited_text=detected_text,
+                media_path=hit_media_path,
             )
         except Exception:  # noqa: BLE001
             logger.exception("[敏感词过滤] 处理违规消息时发生异常")
@@ -617,7 +640,7 @@ class SensitiveFilterPlugin(Star):
 
     async def _check_qq_forward_messages(
         self, event: AstrMessageEvent, umo: str
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """展开 QQ OneBot 合并转发中的文本和图片，并使用现有流程审核。"""
         forward_texts, forward_images = await self._get_qq_forward_contents(event)
         use_llm_batch = self._get_effective(umo, "llm_enabled", False) and self._cfg(
@@ -636,14 +659,14 @@ class SensitiveFilterPlugin(Star):
             )
             if hit_word:
                 source = f"QQ合并转发（{text_source}）"
-                return hit_word, source, text
+                return hit_word, source, text, None
 
         if self._get_effective(umo, "image_enabled", False):
             hit_word, image_source, image_path = await self._check_image_paths(
                 event, umo, forward_images
             )
             if hit_word:
-                return hit_word, f"QQ合并转发（{image_source}）", image_path
+                return hit_word, f"QQ合并转发（{image_source}）", image_path, image_path
 
         if use_llm_batch and forward_texts:
             # 一个合并转发卡只占批量队列中的一个位置。保留节点边界和原作者信息，
@@ -653,7 +676,7 @@ class SensitiveFilterPlugin(Star):
                 for text, _forward_id, node_index, sender in forward_texts
             )
             await self._enqueue_for_llm_batch(event, umo, batch_text)
-        return None, None, None
+        return None, None, None, None
 
     async def _get_qq_forward_contents(
         self, event: AstrMessageEvent
@@ -879,13 +902,13 @@ class SensitiveFilterPlugin(Star):
 
     async def _check_images(
         self, event: AstrMessageEvent, umo: str
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         """对消息里的图片做检测：先看图片内容本身是否违规，再把图片里的文字
         转写出来复用现有的文字检测流水线。任意一张图片命中即返回，不再继续看
         后面的图片。"""
         images = self._get_images_from_event(event)
         if not images:
-            return None, None
+            return None, None, None
 
         for image in images:
             try:
@@ -898,9 +921,9 @@ class SensitiveFilterPlugin(Star):
                 event, umo, [image_path]
             )
             if hit_word:
-                return hit_word, source
+                return hit_word, source, image_path
 
-        return None, None
+        return None, None, None
 
     # ------------------------------------------------------------------
     # AI 语义检测批量队列：攒够 llm_batch_size 条消息或等待超过
@@ -1045,6 +1068,7 @@ class SensitiveFilterPlugin(Star):
         hit_word: str,
         source: str,
         audited_text: str | None = None,
+        media_path: str | None = None,
     ) -> None:
         sender_id = event.get_sender_id()
         sender_name = event.get_sender_name()
@@ -1053,10 +1077,9 @@ class SensitiveFilterPlugin(Star):
         violation_count, mute_duration = self._record_violation_for_mute(umo, sender_id)
         mute_executed = False
 
+        recall_executed = False
         if self._get_effective(umo, "recall_enabled", True):
             recall_executed = await self._try_recall(event)
-        else:
-            recall_executed = False
 
         if self._get_effective(umo, "mute_enabled", False):
             if mute_duration > 0:
@@ -1081,6 +1104,20 @@ class SensitiveFilterPlugin(Star):
             recall_executed=recall_executed,
         )
 
+        self._append_violation_record(
+            umo=umo,
+            group_id=group_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            hit_word=hit_word,
+            source=source,
+            original_text=original_text,
+            violation_count=violation_count,
+            recall_executed=recall_executed,
+            mute_duration=mute_duration if mute_executed else 0,
+            media_path=media_path,
+        )
+
         if self._get_effective(umo, "warn_enabled", True):
             tmpl = self._cfg("warn_message") or DEFAULT_WARN_MESSAGE
             warn_text = self._render_template(tmpl, template_vars)
@@ -1094,14 +1131,128 @@ class SensitiveFilterPlugin(Star):
                 notify_text = self._render_template(notify_tmpl, template_vars)
                 for target_umo in notify_targets:
                     try:
-                        await self.context.send_message(
-                            target_umo, MessageChain().message(notify_text)
-                        )
+                        notify_chain = MessageChain().message(notify_text)
+                        if media_path:
+                            self._append_image_to_chain(notify_chain, media_path)
+                        await self.context.send_message(target_umo, notify_chain)
                     except Exception:  # noqa: BLE001
                         logger.exception(f"[敏感词过滤] 发送通知到 {target_umo} 失败")
 
         if self._cfg("stop_event_on_hit", True):
             event.stop_event()
+
+    def _violation_records_path(self) -> Path:
+        custom_path = getattr(self, "_violation_records_file", None)
+        if custom_path:
+            return Path(custom_path)
+        return Path(__file__).with_name(_VIOLATION_RECORDS_FILENAME)
+
+    def _load_violation_records(self) -> None:
+        """从持久化文件加载违规记录；文件不存在时视为空记录。"""
+        path = self._violation_records_path()
+        try:
+            if not path.exists():
+                self._violation_records = []
+                self._next_violation_record_id = 1
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                raise TypeError("违规记录文件格式不是列表")
+            records = [item for item in data if isinstance(item, dict)]
+            records.sort(key=lambda item: int(item.get("id") or 0))
+            self._violation_records = records
+            max_id = max((int(item.get("id") or 0) for item in records), default=0)
+            self._next_violation_record_id = max_id + 1
+        except Exception:  # noqa: BLE001
+            logger.exception(f"[敏感词过滤] 加载违规记录失败，已从空记录启动: {path}")
+            self._violation_records = []
+            self._next_violation_record_id = 1
+
+    def _save_violation_records(self) -> None:
+        """把完整违规记录原子写入磁盘，保证重启/重载后仍可查看。"""
+        path = self._violation_records_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            tmp_path.write_text(
+                json.dumps(self._violation_records, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+        except Exception:  # noqa: BLE001
+            logger.exception(f"[敏感词过滤] 保存违规记录失败: {path}")
+
+    def _clear_violation_records(self) -> None:
+        self._violation_records = []
+        self._next_violation_record_id = 1
+        self._save_violation_records()
+
+    def _append_violation_record(
+        self,
+        *,
+        umo: str,
+        group_id: Any,
+        sender_id: Any,
+        sender_name: Any,
+        hit_word: Any,
+        source: Any,
+        original_text: Any,
+        violation_count: int,
+        recall_executed: bool,
+        mute_duration: int,
+        media_path: str | None = None,
+    ) -> None:
+        """记录违规命中，供额外插件页面展示，并持久化完整历史。"""
+        record = {
+            "id": self._next_violation_record_id,
+            "ts": int(time.time()),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "umo": str(umo),
+            "group_id": str(group_id),
+            "user_id": str(sender_id),
+            "user_name": str(sender_name),
+            "forbidden_words": str(hit_word),
+            "reason": str(hit_word),
+            "source": str(source),
+            "original_text": str(original_text or ""),
+            "masked_text": self._mask_text(str(original_text or ""), str(hit_word)),
+            "violation_count": int(violation_count or 0),
+            "recall_executed": bool(recall_executed),
+            "mute_duration": int(mute_duration or 0),
+            "media_path": str(media_path or ""),
+        }
+        self._next_violation_record_id += 1
+        self._violation_records.append(record)
+        self._save_violation_records()
+
+    def _append_image_to_chain(
+        self, chain: MessageChain, image_path: str
+    ) -> MessageChain:
+        """把命中的图片/GIF 附加到通知消息链。优先使用 AstrBot MessageChain
+        原生方法，测试或旧版本环境缺少方法时退化为直接追加 Comp.Image。"""
+        image_path = str(image_path or "").strip()
+        if not image_path:
+            return chain
+        try:
+            if image_path.startswith(("http://", "https://")) and hasattr(
+                chain, "url_image"
+            ):
+                chain.url_image(image_path)
+                return chain
+            if hasattr(chain, "file_image"):
+                chain.file_image(image_path)
+                return chain
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[敏感词过滤] 构造图片通知消息链失败，尝试兼容模式追加图片"
+            )
+
+        image = Comp.Image(file=image_path)
+        if hasattr(chain, "chain"):
+            chain.chain.append(image)
+        elif hasattr(chain, "parts"):
+            chain.parts.append(image)
+        return chain
 
     def _mask_text(self, text: str, forbidden_words: str) -> str:
         """根据命中词生成脱敏后的原文。无法精确替换时返回原文。"""

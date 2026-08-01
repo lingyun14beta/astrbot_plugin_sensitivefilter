@@ -13,7 +13,9 @@ filter 装饰器、消息事件对象、Context 等），重点验证“插件�
 """
 
 import asyncio
+import json
 import sys
+import tempfile
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,6 +72,19 @@ class MessageChain:
 
     def message(self, text):
         self.parts.append(text)
+        self.chain.append(Plain(text))
+        return self
+
+    def url_image(self, url):
+        image = Image.fromURL(url)
+        self.parts.append(image)
+        self.chain.append(image)
+        return self
+
+    def file_image(self, path):
+        image = Image.fromFileSystem(path)
+        self.parts.append(image)
+        self.chain.append(image)
         return self
 
 
@@ -180,6 +195,14 @@ class Image:
         self.url = url or ""
         self.path = path or ""
 
+    @staticmethod
+    def fromURL(url):
+        return Image(file=url, url=url)
+
+    @staticmethod
+    def fromFileSystem(path):
+        return Image(file=path, path=path)
+
     async def convert_to_file_path(self):
         if self.path:
             return self.path
@@ -289,6 +312,7 @@ class FakeContext:
         self.sent_messages = []  # [(umo, chain)]
         self.provider_by_id = {}
         self.using_provider = None
+        self.web_apis = []  # [(path, handler, methods, desc)]
 
     def get_provider_by_id(self, pid):
         return self.provider_by_id.get(pid)
@@ -298,6 +322,9 @@ class FakeContext:
 
     async def send_message(self, umo, chain):
         self.sent_messages.append((umo, chain))
+
+    def register_web_api(self, path, handler, methods, desc):
+        self.web_apis.append((path, handler, methods, desc))
 
 
 class FakeAiocqhttpBotApi:
@@ -399,7 +426,12 @@ def set_cfg(config, key, value):
         config.setdefault(section, {})[key] = value
 
 
-def make_plugin(extra_config=None):
+def make_plugin(extra_config=None, records_file=None):
+    if records_file is None:
+        records_file = (
+            Path(tempfile.mkdtemp(prefix="sensitivefilter-test-")) / "records.json"
+        )
+    SensitiveFilterPlugin._violation_records_file = str(records_file)
     config = FakeConfig(
         {
             "group_overrides": [],
@@ -474,6 +506,98 @@ def make_plugin(extra_config=None):
 async def run_tests():
     plugin, ctx, config = make_plugin()
 
+    # ---------- 额外插件页面 Web API 注册（不是 _conf_schema 设置 UI） ----------
+    registered_web_paths = {item[0] for item in ctx.web_apis}
+    check(
+        "额外插件页面注册统计 API",
+        "/astrbot_plugin_sensitivefilter/stats" in registered_web_paths,
+    )
+    check(
+        "额外插件页面注册分群配置保存 API",
+        "/astrbot_plugin_sensitivefilter/group_overrides/save" in registered_web_paths,
+    )
+    check(
+        "额外插件页面注册违规记录 API",
+        "/astrbot_plugin_sensitivefilter/records" in registered_web_paths,
+    )
+    check(
+        "额外插件页面注册被撤回用户 API",
+        "/astrbot_plugin_sensitivefilter/moderation_users" in registered_web_paths,
+    )
+    check(
+        "额外插件页面注册 CSV 导出 API",
+        "/astrbot_plugin_sensitivefilter/records/export" in registered_web_paths,
+    )
+    check(
+        "额外插件页面注册今日统计 API",
+        "/astrbot_plugin_sensitivefilter/today_stats" in registered_web_paths,
+    )
+    check(
+        "额外插件页面注册仪表盘趋势 API",
+        "/astrbot_plugin_sensitivefilter/dashboard/trend" in registered_web_paths,
+    )
+    stats_handler = next(
+        handler
+        for path, handler, _methods, _desc in ctx.web_apis
+        if path == "/astrbot_plugin_sensitivefilter/stats"
+    )
+    stats_payload = await stats_handler()
+    check("额外插件页面统计 API 返回成功", stats_payload["status"] == "success")
+    check(
+        "额外插件页面统计包含全局词库数量",
+        stats_payload["data"]["global_words_count"] == 2,
+    )
+    check(
+        "额外插件页面统计包含违规记录数量",
+        stats_payload["data"]["records_count"] == 0,
+    )
+
+    # ---------- 违规记录：无限条数、持久化留存、一键清空 ----------
+    with tempfile.TemporaryDirectory() as tmpdir:
+        records_path = Path(tmpdir) / "violation_records.json"
+        persistent_plugin, _persistent_ctx, _persistent_config = make_plugin(
+            records_file=records_path
+        )
+        for idx in range(505):
+            persistent_plugin._append_violation_record(
+                umo="telegram:GroupMessage:persist",
+                group_id="persist",
+                sender_id=f"user-{idx % 3}",
+                sender_name=f"用户{idx % 3}",
+                hit_word="测试原因" + str(idx),
+                source="测试",
+                original_text="测试消息" + str(idx),
+                violation_count=idx + 1,
+                recall_executed=True,
+                mute_duration=0,
+            )
+        check(
+            "违规记录不再按500条裁剪", len(persistent_plugin._violation_records) == 505
+        )
+        data = json.loads(records_path.read_text(encoding="utf-8"))
+        check("违规记录写入持久化文件", len(data) == 505)
+        reloaded_plugin, _ctx_reload, _cfg_reload = make_plugin(
+            records_file=records_path
+        )
+        check("插件重载后保留违规记录", len(reloaded_plugin._violation_records) == 505)
+        records_resp = await reloaded_plugin._web_records()
+        check(
+            "违规记录 API 返回全部记录",
+            records_resp["total"] == 505 and len(records_resp["data"]) == 505,
+        )
+        check(
+            "违规记录包含可查看原因字段",
+            records_resp["data"][0]["reason"].startswith("测试原因"),
+        )
+        await reloaded_plugin._web_records_clear()
+        check("一键清空会清空内存记录", reloaded_plugin._violation_records == [])
+        check(
+            "一键清空会清空持久化文件",
+            json.loads(records_path.read_text(encoding="utf-8")) == [],
+        )
+    if hasattr(SensitiveFilterPlugin, "_violation_records_file"):
+        delattr(SensitiveFilterPlugin, "_violation_records_file")
+
     # ---------- 基础命中：撤回(非aiocqhttp跳过) + 警告 + stop_event ----------
     ev = FakeEvent("group1", "u1", "张三", "这是一条含有敏感词的消息")
     await plugin.on_group_message(ev)
@@ -491,6 +615,59 @@ async def run_tests():
         any("违规次数：第1次" in getattr(c, "text", "") for c in warn_chain),
     )
     check("命中后事件被stop", ev.stopped is True)
+    records_handler = next(
+        handler
+        for path, handler, _methods, _desc in ctx.web_apis
+        if path == "/astrbot_plugin_sensitivefilter/records"
+    )
+    records_payload = await records_handler()
+    check("违规记录 API 返回成功", records_payload["status"] == "success")
+    check(
+        "违规记录 API 记录命中词",
+        records_payload["data"][0]["forbidden_words"] == "敏感词",
+    )
+    users_handler = next(
+        handler
+        for path, handler, _methods, _desc in ctx.web_apis
+        if path == "/astrbot_plugin_sensitivefilter/moderation_users"
+    )
+    users_payload = await users_handler()
+    check("被撤回用户 API 返回成功", users_payload["status"] == "success")
+    check("被撤回用户 API 聚合用户", users_payload["data"][0]["user_id"] == "u1")
+    export_handler = next(
+        handler
+        for path, handler, _methods, _desc in ctx.web_apis
+        if path == "/astrbot_plugin_sensitivefilter/records/export"
+    )
+    csv_body, csv_status, csv_headers = await export_handler()
+    check("违规记录 CSV 导出成功", csv_status == 200)
+    check("违规记录 CSV 包含被撤回内容", "这是一条含有敏感词的消息" in csv_body)
+    check(
+        "违规记录 CSV 下载文件名正确",
+        "sensitivefilter_records.csv" in csv_headers.get("Content-Disposition", ""),
+    )
+    stats_payload_after_hit = await stats_handler()
+    check(
+        "总览统计违规记录数量随命中增加",
+        stats_payload_after_hit["data"]["records_count"] == 1,
+    )
+    today_handler = next(
+        handler
+        for path, handler, _methods, _desc in ctx.web_apis
+        if path == "/astrbot_plugin_sensitivefilter/today_stats"
+    )
+    today_payload = await today_handler()
+    check(
+        "今日统计 API 返回群排行",
+        today_payload["data"]["group_ranking"][0]["count"] == 1,
+    )
+    trend_handler = next(
+        handler
+        for path, handler, _methods, _desc in ctx.web_apis
+        if path == "/astrbot_plugin_sensitivefilter/dashboard/trend"
+    )
+    trend_payload = await trend_handler()
+    check("仪表盘趋势 API 返回列表", isinstance(trend_payload["data"], list))
 
     # ---------- 用户白名单：命中用户 ID 后跳过所有审查，不撤回/警告/stop ----------
     plugin_allow_user, _ctx_allow_user, _cfg_allow_user = make_plugin(
@@ -779,6 +956,9 @@ async def run_tests():
     # ---------- QQ OneBot 合并转发：节点图片复用现有视觉审核 ----------
     config["image_detection"]["image_enabled"] = True
     config["image_detection"]["image_provider_id"] = "forward-vision"
+    config["actions"]["notify_enabled"] = True
+    config["actions"]["notify_umos"] = ["aiocqhttp:FriendMessage:forward-image-admin"]
+    sent_before_forward_image_notify = len(ctx.sent_messages)
     ctx.provider_by_id["forward-vision"] = FakeVisionProvider(
         '{"image_violate": true, "image_reason": "违规图片", "extracted_text": ""}'
     )
@@ -820,6 +1000,22 @@ async def run_tests():
         [call for call in ev_forward_image.bot.api.calls if call[0] == "delete_msg"]
         == [("delete_msg", {"message_id": "msg-1"})],
     )
+    forward_image_notify_umo, forward_image_notify_chain = ctx.sent_messages[
+        sent_before_forward_image_notify
+    ]
+    check(
+        "QQ合并转发节点图片命中后通知到配置会话",
+        forward_image_notify_umo == "aiocqhttp:FriendMessage:forward-image-admin",
+    )
+    check(
+        "QQ合并转发节点图片通知包含命中图片",
+        any(
+            isinstance(part, Image) and part.file == "https://example.com/forward.jpg"
+            for part in forward_image_notify_chain.parts
+        ),
+    )
+    config["actions"]["notify_enabled"] = False
+    config["actions"]["notify_umos"] = []
     config["image_detection"]["image_enabled"] = False
     config["image_detection"]["image_provider_id"] = ""
 
@@ -954,14 +1150,15 @@ async def run_tests():
     # ---------- 通知功能 ----------
     config["actions"]["notify_enabled"] = True
     config["actions"]["notify_umos"] = ["aiocqhttp:FriendMessage:admin1"]
+    sent_before_notify = len(ctx.sent_messages)
     ev_notify = FakeEvent("group1", "u8", "郑十", "这是广告")
     await plugin.on_group_message(ev_notify)
-    check("通知功能转发到指定umo", len(ctx.sent_messages) == 1)
-    notify_umo, notify_chain = ctx.sent_messages[0]
+    check("通知功能转发到指定umo", len(ctx.sent_messages) == sent_before_notify + 1)
+    notify_umo, notify_chain = ctx.sent_messages[sent_before_notify]
     check("通知umo正确", notify_umo == "aiocqhttp:FriendMessage:admin1")
     check(
         "通知内容包含命中词",
-        any("广告" in p for p in notify_chain.parts),
+        any("广告" in p for p in notify_chain.parts if isinstance(p, str)),
     )
 
     # ---------- LLM 检测路径 ----------
@@ -1267,12 +1464,15 @@ async def run_tests():
         '{"image_violate": true, "image_reason": "血腥暴力画面", "extracted_text": ""}'
     )
     config["image_detection"]["image_provider_id"] = "vision-1"
+    config["actions"]["notify_enabled"] = True
+    config["actions"]["notify_umos"] = ["aiocqhttp:FriendMessage:image-admin"]
+    sent_before_image_notify = len(ctx.sent_messages)
     ev_img_violate = FakeEvent(
         "group_img1",
         "u31",
         "图片测试乙",
         "",
-        images=[Image(file="https://example.com/b.jpg")],
+        images=[Image(file="https://example.com/b.gif")],
     )
     await plugin.on_group_message(ev_img_violate)
     check("图片内容违规时发出警告", len(ev_img_violate.sent_results) == 1)
@@ -1283,7 +1483,19 @@ async def run_tests():
     )
     check(
         "确实把图片路径传给了视觉Provider",
-        ctx.provider_by_id["vision-1"].last_image_urls == ["https://example.com/b.jpg"],
+        ctx.provider_by_id["vision-1"].last_image_urls == ["https://example.com/b.gif"],
+    )
+    image_notify_umo, image_notify_chain = ctx.sent_messages[sent_before_image_notify]
+    check(
+        "图片违规命中后通知到配置会话",
+        image_notify_umo == "aiocqhttp:FriendMessage:image-admin",
+    )
+    check(
+        "图片违规通知包含命中图片",
+        any(
+            isinstance(part, Image) and part.file == "https://example.com/b.gif"
+            for part in image_notify_chain.parts
+        ),
     )
 
     # ---------- 图片违规时通知原文显示图片标识文案 ----------
@@ -1325,6 +1537,7 @@ async def run_tests():
         '{"image_violate": false, "image_reason": "", '
         '"extracted_text": "这张图片里写着敏感词"}'
     )
+    sent_before_ocr_notify = len(ctx.sent_messages)
     ev_img_text_hit = FakeEvent(
         "group_img1",
         "u32",
@@ -1339,6 +1552,20 @@ async def run_tests():
         "图片文字识别命中词体现在警告文案中",
         any("敏感词" in getattr(c, "text", "") for c in warn_chain_img2),
     )
+    ocr_notify_umo, ocr_notify_chain = ctx.sent_messages[sent_before_ocr_notify]
+    check(
+        "图片文字识别命中后通知到配置会话",
+        ocr_notify_umo == "aiocqhttp:FriendMessage:image-admin",
+    )
+    check(
+        "图片文字识别命中后通知包含原图",
+        any(
+            isinstance(part, Image) and part.file == "https://example.com/c.jpg"
+            for part in ocr_notify_chain.parts
+        ),
+    )
+    config["actions"]["notify_enabled"] = False
+    config["actions"]["notify_umos"] = []
 
     # ---------- 图片检测：图片不违规且没有文字 ----------
     ctx.provider_by_id[
