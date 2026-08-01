@@ -297,6 +297,8 @@ function buildSettingsSection(section) {
         bridge.apiPost("page/settings/save", { values }),
       );
       toast(`已保存 ${res.saved.length} 项「${section.title}」配置`);
+      // 保存成功后重新拉取，让显示值回读自后端持久化状态，作为保存成功的确认
+      loadSettings();
     } finally {
       saveBtn.disabled = false;
     }
