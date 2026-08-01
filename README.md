@@ -260,3 +260,7 @@ python tests/run_all.py
 ```
 
 请在 PR 描述中说明改动的行为影响；涉及配置项、消息处理或平台适配时，请同步补充相应测试和文档。
+
+---
+
+![Moe Counter](https://count.getloli.com/get/@astrbot-sensitivefilter-lingyun?theme=moebooru)
