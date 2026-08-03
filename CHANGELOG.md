@@ -5,8 +5,6 @@
 ### Added
 
 - 新增 AstrBot Page 管理页面「敏感词管理」，支持总览、全局词库、分群配置、名单管理和本地命中测试五个标签页，并适配明/暗主题；页面操作与指令读写同一份配置，修改即时生效。
-- 新增全局设置标签：按 基础/动作/接口检测/AI 检测/图片检测 五个分组渲染布尔、数值、下拉、文本、列表等控件，每个分组独立保存。
-- 为管理页注册 12 条 `/api/v1/plugins/extensions/astrbot_plugin_sensitivefilter/page/` Web API，并在旧版 AstrBot（无 `astrbot.api.web`）上优雅降级，不影响核心检测功能。
 - 新增 `tests/test_page_apis.py`（39 项断言）覆盖页面 API 的合法/非法输入、配置同源读写、原子保存、脏数据兜底与 Trie 重建，并接入 `tests/run_all.py`。
 
 ### Fixed
