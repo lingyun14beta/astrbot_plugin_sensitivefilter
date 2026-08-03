@@ -42,6 +42,18 @@ from .llm_checker import (
 )
 from .word_matcher import WordTrie, normalize_text
 
+PLUGIN_NAME = "astrbot_plugin_sensitivefilter"
+
+# 插件 Web 管理页（Pages）依赖较新版本 AstrBot 提供的 astrbot.api.web；
+# 旧版本没有该模块时静默降级，只影响 Web 管理页，不影响插件其余功能。
+try:
+    from astrbot.api.web import error_response, json_response, request
+
+    _WEB_API_AVAILABLE = True
+except ImportError:  # pragma: no cover - 取决于运行环境的 AstrBot 版本
+    error_response = json_response = request = None  # type: ignore[assignment]
+    _WEB_API_AVAILABLE = False
+
 # 群配置中支持“跟随全局 / 单独覆盖”的布尔类开关
 _OVERRIDABLE_BOOL_KEYS = (
     "enabled",
@@ -142,6 +154,218 @@ _ON_VALUES = {"on", "开", "开启", "true", "1", "启用"}
 _OFF_VALUES = {"off", "关", "关闭", "false", "0", "禁用"}
 _FOLLOW_VALUES = {"默认", "跟随", "auto", "follow"}
 
+# Web 管理页名单管理接口支持的名单类型 -> (启用开关 key, 列表 key)
+_ACCESS_LIST_MAP = {
+    "whitelist": ("whitelist_enabled", "whitelist_umos"),
+    "blacklist": ("blacklist_enabled", "blacklist_umos"),
+    "user": ("user_whitelist_enabled", "user_whitelist_ids"),
+}
+
+# Web 管理页「全局设置」可编辑的配置项规格。
+# 只收录适合在页面上直接编辑的项（全局词库/分群配置/名单有各自专门的标签页）。
+# type 决定前端渲染的控件和后端校验规则；default 仅用于配置缺失时的展示。
+_PAGE_SETTING_SPEC: dict[str, dict] = {
+    # ---- 基础设置 ----
+    "enabled": {"type": "bool", "label": "插件总开关", "default": True},
+    "local_enabled": {
+        "type": "bool",
+        "label": "本地词库检测（全局默认）",
+        "default": True,
+    },
+    "case_insensitive": {"type": "bool", "label": "忽略大小写", "default": True},
+    "fuzzy_match": {
+        "type": "bool",
+        "label": "模糊匹配（防拆字绕过）",
+        "default": True,
+    },
+    "stop_event_on_hit": {
+        "type": "bool",
+        "label": "命中后阻止事件继续传播",
+        "default": True,
+    },
+    "qq_forward_debug": {
+        "type": "bool",
+        "label": "QQ 合并转发调试模式",
+        "default": False,
+    },
+    # ---- 处理动作默认值 ----
+    "recall_enabled": {"type": "bool", "label": "命中后撤回消息", "default": True},
+    "warn_enabled": {"type": "bool", "label": "命中后群内警告", "default": True},
+    "warn_message": {
+        "type": "text",
+        "label": "群内警告文案模板",
+        "hint": "支持 {forbidden_words} {original_text} {masked_text} {violation_count} 等变量；留空使用内置默认模板",
+        "default": "",
+    },
+    "notify_enabled": {"type": "bool", "label": "命中后转发通知", "default": False},
+    "notify_umos": {
+        "type": "list",
+        "label": "通知接收会话列表",
+        "hint": "每行一个 umo，如 aiocqhttp:GroupMessage:123456",
+        "default": [],
+    },
+    "notify_message": {
+        "type": "text",
+        "label": "通知文案模板",
+        "hint": "支持 {group_id} {user_name} {user_id} {forbidden_words} {violation_count} {ban_duration} {timestamp} 等变量；留空使用内置默认模板",
+        "default": "",
+    },
+    "mute_enabled": {"type": "bool", "label": "命中后自动禁言", "default": False},
+    "mute_first_duration_seconds": {
+        "type": "int",
+        "label": "首次违规禁言时长（秒）",
+        "min": 0,
+        "max": 86400,
+        "default": 60,
+    },
+    "mute_second_duration_seconds": {
+        "type": "int",
+        "label": "第二次违规禁言时长（秒）",
+        "min": 0,
+        "max": 86400,
+        "default": 300,
+    },
+    "mute_third_duration_seconds": {
+        "type": "int",
+        "label": "第三次及以上禁言时长（秒）",
+        "min": 0,
+        "max": 2592000,
+        "default": 86400,
+    },
+    "mute_reset_hour": {
+        "type": "int",
+        "label": "违规次数重置时间（小时，0-23）",
+        "min": 0,
+        "max": 23,
+        "default": 0,
+    },
+    # ---- 外部接口检测 ----
+    "api_enabled": {
+        "type": "bool",
+        "label": "启用外部接口检测（全局默认）",
+        "default": False,
+    },
+    "api_provider": {
+        "type": "select",
+        "label": "外部接口类型",
+        "options": ["uapis_profanitycheck", "generic"],
+        "default": "uapis_profanitycheck",
+    },
+    "api_url": {
+        "type": "str",
+        "label": "检测接口地址",
+        "default": UAPIS_PROFANITYCHECK_URL,
+    },
+    "api_key": {
+        "type": "str",
+        "label": "uapis.cn 接口密钥（可选）",
+        "default": "",
+    },
+    "api_method": {
+        "type": "select",
+        "label": "请求方式（仅 generic）",
+        "options": ["POST", "GET"],
+        "default": "POST",
+    },
+    "api_headers": {
+        "type": "text",
+        "label": "自定义请求头 JSON（仅 generic）",
+        "default": "{}",
+    },
+    "api_text_field": {
+        "type": "str",
+        "label": "文本字段名（仅 generic）",
+        "default": "text",
+    },
+    "api_hit_path": {
+        "type": "str",
+        "label": "“是否命中”字段路径（仅 generic）",
+        "default": "hit",
+    },
+    "api_reason_path": {
+        "type": "str",
+        "label": "“命中原因”字段路径（仅 generic）",
+        "default": "reason",
+    },
+    "api_timeout": {
+        "type": "float",
+        "label": "接口请求超时（秒）",
+        "min": 1,
+        "max": 30,
+        "default": 5.0,
+    },
+    # ---- AI 语义检测 ----
+    "llm_enabled": {
+        "type": "bool",
+        "label": "启用 AI 语义检测（全局默认）",
+        "default": False,
+    },
+    "llm_provider_id": {
+        "type": "str",
+        "label": "审核模型 Provider ID",
+        "hint": "留空则使用当前会话默认 Provider",
+        "default": "",
+    },
+    "llm_prompt": {
+        "type": "text",
+        "label": "AI 审核提示词模板",
+        "hint": "必须包含 {text} 占位符；留空使用内置默认模板",
+        "default": "",
+    },
+    "llm_batch_enabled": {
+        "type": "bool",
+        "label": "批量审核（降低调用成本）",
+        "default": False,
+    },
+    "llm_batch_size": {
+        "type": "int",
+        "label": "批量大小",
+        "min": 2,
+        "max": 50,
+        "default": 10,
+    },
+    "llm_batch_max_wait_minutes": {
+        "type": "int",
+        "label": "兜底等待时间（分钟）",
+        "min": 1,
+        "max": 120,
+        "default": 30,
+    },
+    "llm_batch_prompt": {
+        "type": "text",
+        "label": "批量审核提示词模板",
+        "hint": "必须包含 {messages} 占位符；留空使用内置默认模板",
+        "default": "",
+    },
+    # ---- 图片检测 ----
+    "image_enabled": {
+        "type": "bool",
+        "label": "启用图片检测（全局默认）",
+        "default": False,
+    },
+    "image_provider_id": {
+        "type": "str",
+        "label": "图片审核 Provider ID",
+        "hint": "必须选择支持视觉的 Provider；留空则不执行图片检测",
+        "default": "",
+    },
+    "image_prompt": {
+        "type": "text",
+        "label": "图片审核提示词模板",
+        "hint": "留空使用内置默认模板",
+        "default": "",
+    },
+}
+
+# 「全局设置」页分组的展示顺序与标题（key 是 _conf_schema.json 里的分组名）
+_PAGE_SETTING_SECTIONS = (
+    ("basic", "基础设置"),
+    ("actions", "处理动作默认值"),
+    ("api_detection", "外部接口检测"),
+    ("llm_detection", "AI 语义检测"),
+    ("image_detection", "图片检测"),
+)
+
 DEFAULT_WARN_MESSAGE = """检测到敏感词{recall_status}，已禁言处理。
 检测到的敏感词：{forbidden_words}
 违规次数：第{violation_count}次"""
@@ -188,6 +412,9 @@ class SensitiveFilterPlugin(Star):
                 "[敏感词过滤] 创建批量审核定时任务失败（没有运行中的事件循环），"
                 "批量审核的兜底超时机制将不可用，但按数量触发的批量逻辑仍正常工作"
             )
+
+        # 注册 Web 管理页（pages/manage/）使用的后端 API；旧版本 AstrBot 上自动跳过
+        self._register_web_apis()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -1648,3 +1875,384 @@ class SensitiveFilterPlugin(Star):
             yield event.plain_result(
                 f"批量审核调用失败：{summary['total']} 条消息未完成审核，请查看日志"
             )
+
+    # ------------------------------------------------------------------
+    # Web 管理页（Pages）后端 API
+    #
+    # 供 pages/manage/ 下的插件页面通过 window.AstrBotPluginPage bridge 调用。
+    # bridge 端 endpoint 不带插件名前缀（如 "page/words"），Dashboard 会转发到
+    # /api/v1/plugins/extensions/astrbot_plugin_sensitivefilter/page/words，
+    # 因此这里注册的路由都带插件名前缀。
+    # ------------------------------------------------------------------
+
+    def _register_web_apis(self) -> None:
+        if not _WEB_API_AVAILABLE:
+            return
+        register = getattr(self.context, "register_web_api", None)
+        if not callable(register):
+            logger.info(
+                "[敏感词过滤] 当前 AstrBot 版本不支持插件 Pages，Web 管理页不可用"
+            )
+            return
+        prefix = f"/{PLUGIN_NAME}/page"
+        register(f"{prefix}/overview", self.page_overview, ["GET"], "管理页总览数据")
+        register(f"{prefix}/words", self.page_list_words, ["GET"], "获取全局词库")
+        register(f"{prefix}/words/add", self.page_add_words, ["POST"], "添加全局敏感词")
+        register(
+            f"{prefix}/words/delete", self.page_delete_word, ["POST"], "删除全局敏感词"
+        )
+        register(f"{prefix}/groups", self.page_list_groups, ["GET"], "获取分群配置")
+        register(
+            f"{prefix}/groups/save", self.page_save_group, ["POST"], "保存分群配置"
+        )
+        register(
+            f"{prefix}/groups/delete", self.page_delete_group, ["POST"], "删除分群配置"
+        )
+        register(
+            f"{prefix}/lists", self.page_list_access_lists, ["GET"], "获取名单配置"
+        )
+        register(
+            f"{prefix}/lists/save", self.page_save_access_list, ["POST"], "保存名单配置"
+        )
+        register(f"{prefix}/test", self.page_test_text, ["POST"], "本地词库命中测试")
+        register(f"{prefix}/settings", self.page_get_settings, ["GET"], "获取全局设置")
+        register(
+            f"{prefix}/settings/save",
+            self.page_save_settings,
+            ["POST"],
+            "保存全局设置",
+        )
+
+    async def page_overview(self):
+        batch_queues = {
+            umo: len(bucket) for umo, bucket in self._llm_batches.items() if bucket
+        }
+        try:
+            batch_size = int(self._cfg("llm_batch_size", 10) or 10)
+        except (TypeError, ValueError):
+            batch_size = 10
+        try:
+            batch_max_wait = float(self._cfg("llm_batch_max_wait_minutes", 30) or 30)
+        except (TypeError, ValueError):
+            batch_max_wait = 30
+        return json_response(
+            {
+                "global": {
+                    "enabled": bool(self._cfg("enabled", True)),
+                    "local_enabled": bool(self._cfg("local_enabled", True)),
+                    "api_enabled": bool(self._cfg("api_enabled", False)),
+                    "llm_enabled": bool(self._cfg("llm_enabled", False)),
+                    "image_enabled": bool(self._cfg("image_enabled", False)),
+                    "recall_enabled": bool(self._cfg("recall_enabled", True)),
+                    "warn_enabled": bool(self._cfg("warn_enabled", True)),
+                    "notify_enabled": bool(self._cfg("notify_enabled", False)),
+                    "mute_enabled": bool(self._cfg("mute_enabled", False)),
+                    "case_insensitive": bool(self._cfg("case_insensitive", True)),
+                    "fuzzy_match": bool(self._cfg("fuzzy_match", True)),
+                },
+                "counts": {
+                    "words": len(self._cfg("words", []) or []),
+                    "groups": len(self._get_group_overrides()),
+                    "whitelist": len(self._cfg("whitelist_umos", []) or []),
+                    "blacklist": len(self._cfg("blacklist_umos", []) or []),
+                    "user_whitelist": len(self._cfg("user_whitelist_ids", []) or []),
+                    "violation_records": len(self._violation_counts),
+                },
+                "access": {
+                    "whitelist_enabled": bool(self._cfg("whitelist_enabled", False)),
+                    "blacklist_enabled": bool(self._cfg("blacklist_enabled", False)),
+                    "user_whitelist_enabled": bool(
+                        self._cfg("user_whitelist_enabled", True)
+                    ),
+                },
+                "batch": {
+                    "enabled": bool(self._cfg("llm_batch_enabled", False)),
+                    "size": batch_size,
+                    "max_wait_minutes": batch_max_wait,
+                    "queues": batch_queues,
+                },
+            }
+        )
+
+    async def page_list_words(self):
+        return json_response({"words": list(self._cfg("words", []) or [])})
+
+    async def page_add_words(self):
+        payload = await request.json(default={})
+        raw = payload.get("words", payload.get("word", []))
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return error_response("words 必须是字符串数组")
+        words = list(self._cfg("words", []) or [])
+        added, skipped = [], []
+        for item in raw:
+            word = str(item or "").strip()
+            if not word:
+                continue
+            if word in words:
+                skipped.append(word)
+                continue
+            words.append(word)
+            added.append(word)
+        if not added:
+            return error_response("没有可添加的词（内容为空或全部已存在）")
+        self._set_cfg("words", words)
+        self._rebuild_global_trie()
+        return json_response({"added": added, "skipped": skipped, "total": len(words)})
+
+    async def page_delete_word(self):
+        payload = await request.json(default={})
+        word = str(payload.get("word") or "").strip()
+        words = list(self._cfg("words", []) or [])
+        if not word or word not in words:
+            return error_response(f"全局词库中没有找到「{word}」")
+        words.remove(word)
+        self._set_cfg("words", words)
+        self._rebuild_global_trie()
+        return json_response({"deleted": word, "total": len(words)})
+
+    async def page_list_groups(self):
+        groups = []
+        for item in self._get_group_overrides():
+            groups.append(
+                {
+                    "umo": str(item.get("umo", "")),
+                    "settings": {
+                        key: item.get(key, "跟随全局") for key in _OVERRIDABLE_BOOL_KEYS
+                    },
+                    "extra_words": list(item.get("extra_words") or []),
+                }
+            )
+        return json_response(
+            {
+                "groups": groups,
+                "switch_keys": list(_OVERRIDABLE_BOOL_KEYS),
+                "tristate_options": list(_TRISTATE_TO_BOOL.keys()),
+            }
+        )
+
+    async def page_save_group(self):
+        payload = await request.json(default={})
+        umo = str(payload.get("umo") or "").strip()
+        if not umo:
+            return error_response("umo 不能为空")
+        settings = payload.get("settings") or {}
+        if not isinstance(settings, dict):
+            return error_response("settings 必须是对象")
+        for key, value in settings.items():
+            if key not in _OVERRIDABLE_BOOL_KEYS:
+                return error_response(f"未知的设置项「{key}」")
+            if value not in _TRISTATE_TO_BOOL:
+                return error_response(
+                    f"设置项「{key}」的值必须是 跟随全局/开启/关闭 之一"
+                )
+        override = self._get_or_create_group_override(umo)
+        for key, value in settings.items():
+            override[key] = value
+        extra_words = payload.get("extra_words")
+        if extra_words is not None:
+            if not isinstance(extra_words, list):
+                return error_response("extra_words 必须是字符串数组")
+            override["extra_words"] = [
+                str(w).strip() for w in extra_words if str(w).strip()
+            ]
+        # 注意：这里不调用 _prune_group_override_if_empty。Web 页面上“新增/删除”
+        # 是显式操作，即使全部恢复“跟随全局”且没有专属词，条目也应保留在页面上，
+        # 由用户点“删除该配置”显式移除（自动清理只对群内指令路径生效）。
+        self.config.save_config()
+        self._invalidate_group_trie(umo)
+        return json_response({"saved": True, "umo": umo})
+
+    async def page_delete_group(self):
+        payload = await request.json(default={})
+        umo = str(payload.get("umo") or "").strip()
+        override = self._find_group_override(umo)
+        if override is None:
+            return error_response("该会话没有分群配置")
+        self._get_group_overrides().remove(override)
+        self.config.save_config()
+        self._invalidate_group_trie(umo)
+        return json_response({"deleted": umo})
+
+    async def page_list_access_lists(self):
+        result = {}
+        for name, (enabled_key, list_key) in _ACCESS_LIST_MAP.items():
+            result[name] = {
+                "enabled": bool(self._cfg(enabled_key, False)),
+                "items": list(self._cfg(list_key, []) or []),
+            }
+        return json_response(result)
+
+    async def page_save_access_list(self):
+        payload = await request.json(default={})
+        list_name = str(payload.get("list") or "")
+        keys = _ACCESS_LIST_MAP.get(list_name)
+        if keys is None:
+            return error_response("list 必须是 whitelist / blacklist / user 之一")
+        enabled_key, list_key = keys
+        if "enabled" in payload:
+            self._set_cfg(enabled_key, bool(payload["enabled"]))
+
+        added = removed = None
+        add_value = str(payload.get("add") or "").strip()
+        remove_value = str(payload.get("remove") or "").strip()
+        if add_value:
+            if list_name == "user":
+                added = self._add_to_user_whitelist(add_value)
+            else:
+                added = self._add_to_umo_list(list_key, add_value)
+        if remove_value:
+            if list_name == "user":
+                removed = self._remove_from_user_whitelist(remove_value)
+            else:
+                removed = self._remove_from_umo_list(list_key, remove_value)
+
+        return json_response(
+            {
+                "added": added,
+                "removed": removed,
+                "enabled": bool(self._cfg(enabled_key, False)),
+                "items": list(self._cfg(list_key, []) or []),
+            }
+        )
+
+    async def page_test_text(self):
+        payload = await request.json(default={})
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return error_response("text 不能为空")
+        umo = str(payload.get("umo") or "").strip()
+        norm_text = normalize_text(text)
+
+        hit = self.global_trie.find_first(norm_text)
+        if hit:
+            return json_response(
+                {
+                    "hit": True,
+                    "word": hit,
+                    "source": "全局词库",
+                    "normalized": norm_text,
+                }
+            )
+        if umo:
+            group_trie = self._get_group_trie(umo)
+            if group_trie:
+                hit = group_trie.find_first(norm_text)
+                if hit:
+                    return json_response(
+                        {
+                            "hit": True,
+                            "word": hit,
+                            "source": "本群专属词库",
+                            "normalized": norm_text,
+                        }
+                    )
+        return json_response({"hit": False, "normalized": norm_text})
+
+    # ------------------------------------------------------------------
+    # 全局设置（基础设置 / 处理动作 / 外部接口 / AI 语义 / 图片检测）
+    # ------------------------------------------------------------------
+
+    async def page_get_settings(self):
+        sections = []
+        for section_id, title in _PAGE_SETTING_SECTIONS:
+            fields = []
+            for key, spec in _PAGE_SETTING_SPEC.items():
+                if _KEY_TO_SECTION.get(key) != section_id:
+                    continue
+                value = self._cfg(key, spec.get("default"))
+                # 配置文件可能被手工改坏（比如把列表写成了字符串），
+                # 这里兜底纠正，避免前端 .join 等方法直接崩掉
+                if spec["type"] == "list" and not isinstance(value, list):
+                    value = list(spec.get("default") or [])
+                field = {
+                    "key": key,
+                    "type": spec["type"],
+                    "label": spec["label"],
+                    "value": value,
+                }
+                for opt in ("min", "max", "options", "hint"):
+                    if opt in spec:
+                        field[opt] = spec[opt]
+                fields.append(field)
+            sections.append({"id": section_id, "title": title, "fields": fields})
+        return json_response({"sections": sections})
+
+    @staticmethod
+    def _validate_page_setting(spec: dict, value: Any) -> tuple[bool, Any]:
+        """按 _PAGE_SETTING_SPEC 校验并清洗一个配置值。
+
+        返回 (是否通过, 清洗后的值或错误消息)。
+        """
+        spec_type = spec["type"]
+        if spec_type == "bool":
+            if isinstance(value, bool):
+                return True, value
+            return False, "必须是布尔值"
+        if spec_type == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                return False, "必须是整数"
+            if value < spec.get("min", -(2**63)) or value > spec.get("max", 2**63):
+                return False, f"必须在 {spec.get('min')} ~ {spec.get('max')} 之间"
+            return True, value
+        if spec_type == "float":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False, "必须是数字"
+            value = float(value)
+            if value < spec.get("min", float("-inf")) or value > spec.get(
+                "max", float("inf")
+            ):
+                return False, f"必须在 {spec.get('min')} ~ {spec.get('max')} 之间"
+            return True, value
+        if spec_type in ("str", "text"):
+            if isinstance(value, str):
+                return True, value
+            return False, "必须是字符串"
+        if spec_type == "list":
+            if not isinstance(value, list):
+                return False, "必须是字符串数组"
+            return True, [str(v).strip() for v in value if str(v).strip()]
+        if spec_type == "select":
+            if value in spec.get("options", []):
+                return True, value
+            return False, f"必须是 {'/'.join(spec.get('options', []))} 之一"
+        return False, f"未知的配置类型 {spec_type}"
+
+    async def page_save_settings(self):
+        payload = await request.json(default={})
+        values = payload.get("values")
+        if not isinstance(values, dict) or not values:
+            return error_response("values 必须是非空对象")
+
+        # 先全部校验，有任何一项不通过就整体不落盘，保证一次保存是原子的
+        cleaned: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for key, value in values.items():
+            spec = _PAGE_SETTING_SPEC.get(key)
+            if spec is None:
+                errors[key] = "不支持的配置项"
+                continue
+            ok, result = self._validate_page_setting(spec, value)
+            if ok:
+                cleaned[key] = result
+            else:
+                errors[key] = result
+        if errors:
+            message = "；".join(f"{key}: {msg}" for key, msg in errors.items())
+            return error_response(f"校验失败：{message}", data={"errors": errors})
+
+        for key, value in cleaned.items():
+            section = _KEY_TO_SECTION.get(key)
+            if section is None:
+                self.config[key] = value
+            else:
+                self.config.setdefault(section, {})[key] = value
+        self.config.save_config()
+
+        # 匹配行为相关的开关变化后，全局 Trie 和各群 Trie 缓存都要重建
+        if any(k in cleaned for k in ("case_insensitive", "fuzzy_match")):
+            self._rebuild_global_trie()
+            self._group_tries.clear()
+
+        return json_response({"saved": sorted(cleaned.keys())})

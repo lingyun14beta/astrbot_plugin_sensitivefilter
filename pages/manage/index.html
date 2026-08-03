@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>敏感词管理</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- 顶栏 -->
+      <header class="app-header">
+        <div class="title-wrap">
+          <div class="logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-3.6 8-10V5.5L12 2 4 5.5V12c0 6.4 8 10 8 10z" />
+              <path d="M9.5 11.5l2 2 3.5-4" />
+            </svg>
+          </div>
+          <div>
+            <h1 id="page-title">敏感词管理</h1>
+            <p class="subtitle">词库 · 分群策略 · 访问控制 · 命中测试</p>
+          </div>
+        </div>
+        <button id="refresh-btn" class="btn ghost icon-btn" type="button" title="刷新当前数据">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+            <path d="M21 3v6h-6" />
+          </svg>
+          <span>刷新</span>
+        </button>
+      </header>
+
+      <!-- 标签页 -->
+      <nav class="tabs" id="tabs" role="tablist">
+        <button class="tab active" data-tab="overview" type="button" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 13h4v8H3zM10 9h4v12h-4zM17 5h4v16h-4z"/></svg>
+          总览
+        </button>
+        <button class="tab" data-tab="settings" type="button" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg>
+          全局设置
+        </button>
+        <button class="tab" data-tab="words" type="button" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41L11 3.83A2 2 0 0 0 9.59 3.24H4a1 1 0 0 0-1 1v5.59a2 2 0 0 0 .59 1.41l9.58 9.59a2 2 0 0 0 2.83 0l4.59-4.59a2 2 0 0 0 0-2.83z"/><circle cx="7.5" cy="7.5" r=".5"/></svg>
+          全局词库
+        </button>
+        <button class="tab" data-tab="groups" type="button" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4.5v9L12 20l-8-4.5v-9z"/><path d="M12 11l8-4.5M12 11v9M12 11L4 6.5"/></svg>
+          分群配置
+        </button>
+        <button class="tab" data-tab="lists" type="button" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          名单管理
+        </button>
+        <button class="tab" data-tab="test" type="button" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v6.34L4.35 18.1A2 2 0 0 0 6.14 21h11.72a2 2 0 0 0 1.79-2.9L14 9.34V3"/><path d="M7 15h10"/></svg>
+          命中测试
+        </button>
+      </nav>
+
+      <main>
+        <!-- 总览 -->
+        <section id="panel-overview" class="panel active" role="tabpanel">
+          <div id="overview-stats" class="stat-grid"></div>
+          <div class="grid-2">
+            <div class="card">
+              <div class="card-head">
+                <h2>全局开关</h2>
+              </div>
+              <div id="overview-switches" class="kv-list"></div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h2>批量审核队列</h2>
+              </div>
+              <div id="overview-batch" class="kv-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 全局设置 -->
+        <section id="panel-settings" class="panel" role="tabpanel">
+          <div id="settings-sections"></div>
+        </section>
+
+        <!-- 全局词库 -->
+        <section id="panel-words" class="panel" role="tabpanel">
+          <div class="card">
+            <div class="card-head">
+              <h2>添加敏感词</h2>
+              <button id="bulk-toggle" class="btn ghost sm" type="button">批量添加</button>
+            </div>
+            <div class="row">
+              <div class="input-wrap grow">
+                <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                <input id="word-input" type="text" placeholder="输入一个词，回车快速添加" />
+              </div>
+              <button id="word-add-btn" class="btn primary" type="button">添加</button>
+            </div>
+            <div id="bulk-area" class="bulk-area collapsed">
+              <textarea id="word-bulk-input" rows="5" placeholder="每行一个敏感词，支持一次粘贴多行"></textarea>
+              <div class="row-end">
+                <button id="word-bulk-add-btn" class="btn primary" type="button">批量导入</button>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h2>词库列表</h2>
+              <span id="words-count" class="pill"></span>
+            </div>
+            <div class="input-wrap">
+              <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <input id="word-filter" type="text" placeholder="搜索词库…" />
+            </div>
+            <div id="words-list" class="chip-list"></div>
+            <div id="words-empty" class="empty hidden">词库为空，先在上方添加敏感词</div>
+          </div>
+        </section>
+
+        <!-- 分群配置 -->
+        <section id="panel-groups" class="panel" role="tabpanel">
+          <div class="card">
+            <div class="card-head">
+              <h2>新增分群配置</h2>
+            </div>
+            <div class="row">
+              <div class="input-wrap grow">
+                <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                <input id="group-new-umo" type="text" placeholder="填写 umo，如 aiocqhttp:GroupMessage:123456" />
+              </div>
+              <button id="group-new-btn" class="btn primary" type="button">新增</button>
+            </div>
+            <p class="hint">在目标群内发送 <code>/敏感词 状态</code> 可查看该群的 umo；未列出的群全部使用全局默认值。</p>
+          </div>
+          <div id="groups-list"></div>
+          <div id="groups-empty" class="empty hidden">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4.5v9L12 20l-8-4.5v-9z"/><path d="M12 11l8-4.5M12 11v9M12 11L4 6.5"/></svg>
+            <p>暂无分群配置</p>
+          </div>
+        </section>
+
+        <!-- 名单管理 -->
+        <section id="panel-lists" class="panel" role="tabpanel">
+          <div class="card" data-list="whitelist">
+            <div class="card-head">
+              <div>
+                <h2>群白名单</h2>
+                <p class="hint">启用后只有名单内会话会被检测，优先级高于黑名单</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="whitelist-enabled" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="row">
+              <div class="input-wrap grow">
+                <input type="text" id="whitelist-input" placeholder="umo，如 aiocqhttp:GroupMessage:123456" />
+              </div>
+              <button class="btn primary" data-list-add="whitelist" type="button">添加</button>
+            </div>
+            <div id="whitelist-items" class="chip-list"></div>
+          </div>
+
+          <div class="card" data-list="blacklist">
+            <div class="card-head">
+              <div>
+                <h2>群黑名单</h2>
+                <p class="hint">名单内会话完全跳过，不响应任何检测</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="blacklist-enabled" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="row">
+              <div class="input-wrap grow">
+                <input type="text" id="blacklist-input" placeholder="umo" />
+              </div>
+              <button class="btn primary" data-list-add="blacklist" type="button">添加</button>
+            </div>
+            <div id="blacklist-items" class="chip-list"></div>
+          </div>
+
+          <div class="card" data-list="user">
+            <div class="card-head">
+              <div>
+                <h2>用户白名单</h2>
+                <p class="hint">名单内用户的发言完全跳过审查，可用 <code>/sid</code> 获取用户 ID</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="user-enabled" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="row">
+              <div class="input-wrap grow">
+                <input type="text" id="user-input" placeholder="用户 ID" />
+              </div>
+              <button class="btn primary" data-list-add="user" type="button">添加</button>
+            </div>
+            <div id="user-items" class="chip-list"></div>
+          </div>
+        </section>
+
+        <!-- 命中测试 -->
+        <section id="panel-test" class="panel" role="tabpanel">
+          <div class="card">
+            <div class="card-head">
+              <h2>本地词库命中测试</h2>
+            </div>
+            <p class="hint">仅测试本地词库匹配（含模糊匹配规则），不会调用外部接口或 AI 检测；填写 umo 时会同时匹配该群专属词库。</p>
+            <textarea id="test-text" rows="4" placeholder="输入要测试的文本"></textarea>
+            <div class="row">
+              <div class="input-wrap grow">
+                <input id="test-umo" type="text" placeholder="umo（可选）" />
+              </div>
+              <button id="test-run-btn" class="btn primary" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                开始测试
+              </button>
+            </div>
+            <div id="test-result" class="test-result hidden"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- 确认弹窗 -->
+    <div id="modal" class="modal-overlay hidden">
+      <div class="modal" role="dialog" aria-modal="true">
+        <h3 id="modal-title">确认操作</h3>
+        <p id="modal-message"></p>
+        <div class="modal-actions">
+          <button id="modal-cancel" class="btn ghost" type="button">取消</button>
+          <button id="modal-confirm" class="btn danger-solid" type="button">确认删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 通知 -->
+    <div id="toast-stack" class="toast-stack"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
